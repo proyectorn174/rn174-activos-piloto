@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <path fill="#fff" stroke="#0d2f45" stroke-width="5" d="M10 7h44v32c0 10-9 16-22 20C19 55 10 49 10 39Z"/>
+  <path fill="#f36b21" d="M10 7h44v14H10Z"/>
+  <text x="32" y="18" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="700" fill="#fff">RN</text>
+  <text x="32" y="43" text-anchor="middle" font-family="Arial,sans-serif" font-size="18" font-weight="800" fill="#0d2f45">174</text>
+</svg>
