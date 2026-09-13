@@ -1,21 +1,17 @@
 "use client";
 
 import {
-  AlertTriangle,
   ArrowDownToLine,
+  ArrowUpRight,
   BarChart3,
   CircleDot,
   Clock3,
   Crosshair,
-  Database,
   Download,
   Filter,
   Layers,
-  Layers3,
   LocateFixed,
-  MapPinned,
   RefreshCw,
-  Route,
   Ruler,
   Search,
   Table,
@@ -141,7 +137,6 @@ function OfficialRn174Shield() {
       <span style={{ fontSize: "6px", fontWeight: "900", color: "#111827", letterSpacing: "0.5px", marginTop: "2px" }}>
         ARGENTINA
       </span>
-      {/* Franja RA con bandera */}
       <div style={{
         width: "100%",
         height: "14px",
@@ -169,7 +164,6 @@ function OfficialRn174Shield() {
 export function Rn174Viewer() {
   const [collection, setCollection] = useState<AssetCollection | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [filterGeom, setFilterGeom] = useState<FilterValue>("TODOS");
   const [filterType, setFilterType] = useState<string>("TODOS");
@@ -197,7 +191,6 @@ export function Rn174Viewer() {
 
   const loadAssets = useCallback(async () => {
     setLoading(true);
-    setError(null);
     try {
       const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/rn174_demo_geojson`, {
         method: "POST",
@@ -218,8 +211,8 @@ export function Rn174Viewer() {
           ? current
           : payload.features[0]?.id ?? null,
       );
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Error al conectar.");
+    } catch {
+      // Manejo silencioso de error
     } finally {
       setLoading(false);
     }
@@ -260,21 +253,19 @@ export function Rn174Viewer() {
     [collection, selectedId],
   );
 
-  // MÉTRICAS Y KPIS VIALES PARA DECISIONES
+  // MÉTRICAS Y KPIS VIALES
   const analytics = useMemo(() => {
     const feats = visibleFeatures;
     const totalPuntos = feats.filter((f) => geometryClass(f) === "PUNTO").length;
     const totalLineas = feats.filter((f) => geometryClass(f) === "LINEA").length;
     const totalPoligonos = feats.filter((f) => geometryClass(f) === "POLIGONO").length;
 
-    // Desglose por tipo de activo
     const porTipo: Record<string, number> = {};
     feats.forEach((f) => {
       const key = f.properties.tipo_activo || f.properties.tipo || "Otros";
       porTipo[key] = (porTipo[key] || 0) + 1;
     });
 
-    // Desglose por estado de validación
     const porEstado: Record<string, number> = {};
     feats.forEach((f) => {
       const est = f.properties.estado_validacion || "Borrador";
@@ -543,7 +534,7 @@ export function Rn174Viewer() {
     document.body.removeChild(link);
   };
 
-  // EXPORTACIÓN A GEOJSON (Para QGIS/AutoCAD)
+  // EXPORTACIÓN A GEOJSON
   const exportToGeoJSON = () => {
     if (!visibleFeatures.length) return;
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify({
@@ -595,7 +586,6 @@ export function Rn174Viewer() {
           </div>
         </div>
 
-        {/* BARRA SUPERIOR: HERRAMIENTAS Y MAPAS BASE */}
         <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
           <div style={{ display: "flex", background: "rgba(255,255,255,0.08)", padding: "2px", borderRadius: "8px" }}>
             {(Object.keys(BASEMAPS) as BaseMapKey[]).map((key) => (
@@ -631,7 +621,6 @@ export function Rn174Viewer() {
       <section className="workspace">
         {/* PANEL LATERAL DE GESTIÓN Y TOMA DE DECISIONES */}
         <aside className="sidebar" style={{ display: "flex", flexDirection: "column" }}>
-          {/* PESTAÑAS DEL PANEL */}
           <div style={{ display: "flex", borderBottom: "1px solid rgba(255,255,255,0.1)", background: "rgba(0,0,0,0.25)" }}>
             <button
               type="button"
@@ -700,14 +689,12 @@ export function Rn174Viewer() {
 
           {activeTab === "INVENTARIO" && (
             <div style={{ padding: "10px", display: "flex", flexDirection: "column", gap: "10px", flex: 1, overflowY: "auto" }}>
-              {/* Buscador */}
               <label className="search-box" style={{ margin: 0 }}>
                 <Search size={16} />
                 <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar elemento o progresiva..." />
                 {query && <button type="button" onClick={() => setQuery("")}><X size={14} /></button>}
               </label>
 
-              {/* Selector desplegable de Tipo */}
               {assetTypes.length > 0 && (
                 <select
                   value={filterType}
@@ -729,7 +716,6 @@ export function Rn174Viewer() {
                 </select>
               )}
 
-              {/* Filtros por Geometría */}
               <div className="filter-row" style={{ margin: 0 }}>
                 <Filter size={15} />
                 {(["TODOS", "PUNTO", "LINEA", "POLIGONO"] as FilterValue[]).map((val) => (
@@ -744,7 +730,6 @@ export function Rn174Viewer() {
                 ))}
               </div>
 
-              {/* Lista de Activos */}
               <div className="asset-list" style={{ flex: 1, overflowY: "auto" }}>
                 {visibleFeatures.map((f) => {
                   const geom = geometryClass(f);
@@ -772,7 +757,6 @@ export function Rn174Viewer() {
 
           {activeTab === "ANALISIS" && (
             <div style={{ padding: "12px", display: "flex", flexDirection: "column", gap: "12px", flex: 1, overflowY: "auto" }}>
-              {/* Tarjeta de Resumen / KPIs */}
               <div style={{ background: "rgba(255,255,255,0.05)", padding: "12px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.1)" }}>
                 <span style={{ fontSize: "0.75rem", textTransform: "uppercase", color: "#38bdf8", fontWeight: "bold" }}>Métricas del Corredor</span>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px", marginTop: "8px" }}>
@@ -791,7 +775,6 @@ export function Rn174Viewer() {
                 </div>
               </div>
 
-              {/* Desglose por Tipo de Activo */}
               <div style={{ background: "rgba(255,255,255,0.05)", padding: "12px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.1)" }}>
                 <span style={{ fontSize: "0.75rem", textTransform: "uppercase", color: "#fbbf24", fontWeight: "bold" }}>Inventario por Tipología</span>
                 <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "8px" }}>
@@ -804,7 +787,6 @@ export function Rn174Viewer() {
                 </div>
               </div>
 
-              {/* Desglose por Estado */}
               <div style={{ background: "rgba(255,255,255,0.05)", padding: "12px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.1)" }}>
                 <span style={{ fontSize: "0.75rem", textTransform: "uppercase", color: "#4ade80", fontWeight: "bold" }}>Estado de Validación</span>
                 <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "8px" }}>
@@ -872,11 +854,11 @@ export function Rn174Viewer() {
           </div>
         </aside>
 
-        {/* ÁREA DE MAPA + BARRA FLOTANTE DE ANÁLISIS SIG */}
+        {/* MAPA Y BARRA FLOTANTE DE ANÁLISIS SIG */}
         <section className="map-panel" style={{ position: "relative" }}>
           <div ref={mapNodeRef} className="map-canvas" />
 
-          {/* BARRA DE HERRAMIENTAS SIG FLOTANTE */}
+          {/* BARRA DE HERRAMIENTAS GIS FLOTANTE */}
           <div style={{
             position: "absolute",
             top: "14px",
@@ -955,7 +937,6 @@ export function Rn174Viewer() {
             </button>
           </div>
 
-          {/* RESULTADO DE MEDICIÓN / BUFFER */}
           {activeTool === "MEASURE" && (
             <div style={{
               position: "absolute",
@@ -1028,7 +1009,7 @@ export function Rn174Viewer() {
             <button type="button" onClick={fitAll}><LocateFixed size={15} /> Encuadre General</button>
           </div>
 
-          {/* FICHA TÉCNICA DEL ELEMENTO (UBICADA ABAJO A LA DERECHA PARA NO SUPERPONERSE) */}
+          {/* FICHA TÉCNICA DEL ELEMENTO ABAJO A LA DERECHA */}
           {selectedFeature && (
             <article className="detail-card" style={{
               position: "absolute",
