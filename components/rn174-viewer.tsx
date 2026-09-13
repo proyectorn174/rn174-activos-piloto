@@ -13,12 +13,24 @@ import {
   MapPinned,
   RefreshCw,
   Route,
+  Ruler,
   Search,
   ShieldCheck,
+  Target,
+  Trash2,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Circle as LeafletCircle, GeoJSON as LeafletGeoJSON, LocationEvent, Map as LeafletMap, TileLayer } from "leaflet";
+import type {
+  Circle as LeafletCircle,
+  GeoJSON as LeafletGeoJSON,
+  LatLng,
+  LeafletMouseEvent,
+  LocationEvent,
+  Map as LeafletMap,
+  Polyline as LeafletPolyline,
+  TileLayer,
+} from "leaflet";
 
 type GeometryClass = "PUNTO" | "LINEA" | "POLIGONO";
 
@@ -63,8 +75,8 @@ type AssetCollection = {
 };
 
 type FilterValue = "TODOS" | GeometryClass;
-
 type BaseMapKey = "CALLES" | "SATELITE" | "TOPOGRAFICO";
+type ActiveGisTool = "NONE" | "MEASURE" | "BUFFER" | "NEAREST";
 
 const BASEMAPS: Record<BaseMapKey, { name: string; url: string; attr: string }> = {
   CALLES: {
@@ -78,7 +90,7 @@ const BASEMAPS: Record<BaseMapKey, { name: string; url: string; attr: string }> 
     attr: "Tiles &copy; Esri",
   },
   TOPOGRAFICO: {
-    name: "Topográfico",
+    name: "Relieve",
     url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
     attr: "&copy; OpenTopoMap",
   },
@@ -110,10 +122,7 @@ const SUPABASE_PUBLISHABLE_KEY =
   "sb_publishable_QhSYofToTULcOQ5pynkCoQ_Ha6Om1w9";
 
 const normalize = (value?: string) =>
-  (value ?? "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase();
+  (value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 
 const displayValue = (value: string | number | undefined, fallback = "Sin informar") =>
   value === undefined || value === null || value === "" ? fallback : String(value);
@@ -142,13 +151,22 @@ export function Rn174Viewer() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loadedAt, setLoadedAt] = useState<Date | null>(null);
   const [baseMap, setBaseMap] = useState<BaseMapKey>("CALLES");
-  const [bufferDistance, setBufferDistance] = useState<number>(0);
+
+  // Herramientas GIS
+  const [activeTool, setActiveTool] = useState<ActiveGisTool>("NONE");
+  const [measurePoints, setMeasurePoints] = useState<LatLng[]>([]);
+  const [totalDistance, setTotalDistance] = useState<number>(0);
+  const [bufferMeters, setBufferMeters] = useState<number>(100);
+  const [bufferCount, setBufferCount] = useState<number | null>(null);
+  const [nearestResult, setNearestResult] = useState<{ name: string; distance: number } | null>(null);
 
   const mapNodeRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<LeafletMap | null>(null);
   const baseLayerRef = useRef<TileLayer | null>(null);
   const layerRef = useRef<LeafletGeoJSON | null>(null);
   const bufferLayerRef = useRef<LeafletCircle | null>(null);
+  const measureLineRef = useRef<LeafletPolyline | null>(null);
+  const nearestLineRef = useRef<LeafletPolyline | null>(null);
   const leafletRef = useRef<typeof import("leaflet") | null>(null);
 
   const loadAssets = useCallback(async () => {
@@ -189,7 +207,6 @@ export function Rn174Viewer() {
     return () => window.clearTimeout(initialLoad);
   }, [loadAssets]);
 
-  // Lista de tipos de activos únicos para el selector desplegable
   const assetTypes = useMemo(() => {
     const types = new Set<string>();
     for (const f of collection?.features ?? []) {
@@ -272,7 +289,7 @@ export function Rn174Viewer() {
     next.bringToBack();
   }, [baseMap]);
 
-  // Dibujar elementos vectoriales
+  // Dibujar vectoriales
   useEffect(() => {
     const L = leafletRef.current;
     const map = mapRef.current;
@@ -285,7 +302,7 @@ export function Rn174Viewer() {
           const geometry = geometryClass(feature as AssetFeature);
           const selected = String(feature.id ?? "") === selectedId;
           return L.circleMarker(latlng, {
-            radius: selected ? 10 : 8,
+            radius: selected ? 11 : 8,
             color: "#ffffff",
             weight: selected ? 4 : 3,
             fillColor: GEOMETRY_COLORS[geometry] ?? GEOMETRY_COLORS.PUNTO,
@@ -307,7 +324,6 @@ export function Rn174Viewer() {
         onEachFeature: (feature, leafletLayer) => {
           leafletLayer.on("click", () => {
             setSelectedId(String(feature.id ?? ""));
-            setBufferDistance(0);
           });
           const label = feature.properties?.nombre ?? "Activo vial";
           leafletLayer.bindTooltip(label, { sticky: true, direction: "top", opacity: 0.96 });
@@ -317,7 +333,61 @@ export function Rn174Viewer() {
     layerRef.current = layer;
   }, [collection, selectedId, visibleFeatures]);
 
-  // Dibujar Buffer
+  // Modo Medición Interactiva
+  useEffect(() => {
+    const map = mapRef.current;
+    const L = leafletRef.current;
+    if (!map || !L) return;
+
+    if (activeTool !== "MEASURE") {
+      if (measureLineRef.current) {
+        map.removeLayer(measureLineRef.current);
+        measureLineRef.current = null;
+      }
+      setMeasurePoints([]);
+      setTotalDistance(0);
+      return;
+    }
+
+    const handleClick = (e: LeafletMouseEvent) => {
+      setMeasurePoints((prev) => {
+        const next = [...prev, e.latlng];
+        if (next.length > 1) {
+          let dist = 0;
+          for (let i = 1; i < next.length; i++) {
+            dist += next[i - 1].distanceTo(next[i]);
+          }
+          setTotalDistance(Math.round(dist));
+        }
+        return next;
+      });
+    };
+
+    map.on("click", handleClick);
+    return () => {
+      map.off("click", handleClick);
+    };
+  }, [activeTool]);
+
+  // Dibujar línea de medición
+  useEffect(() => {
+    const map = mapRef.current;
+    const L = leafletRef.current;
+    if (!map || !L || activeTool !== "MEASURE") return;
+
+    if (measureLineRef.current) map.removeLayer(measureLineRef.current);
+
+    if (measurePoints.length > 0) {
+      const line = L.polyline(measurePoints, {
+        color: "#f43f5e",
+        weight: 4,
+        dashArray: "6, 8",
+      }).addTo(map);
+      measureLineRef.current = line;
+    }
+  }, [activeTool, measurePoints]);
+
+  // Buffer y Análisis Espacial
   useEffect(() => {
     const map = mapRef.current;
     const L = leafletRef.current;
@@ -327,36 +397,90 @@ export function Rn174Viewer() {
       map.removeLayer(bufferLayerRef.current);
       bufferLayerRef.current = null;
     }
+    setBufferCount(null);
 
-    if (bufferDistance > 0 && selectedFeature) {
+    if (activeTool === "BUFFER" && selectedFeature) {
       const focus = L.geoJSON(selectedFeature as never);
       const bounds = focus.getBounds();
       if (bounds.isValid()) {
         const center = bounds.getCenter();
         const circle = L.circle(center, {
-          radius: bufferDistance,
+          radius: bufferMeters,
           color: "#f59e0b",
           weight: 2,
           dashArray: "6, 6",
           fillColor: "#fbbf24",
-          fillOpacity: 0.2,
+          fillOpacity: 0.22,
         }).addTo(map);
         bufferLayerRef.current = circle;
+
+        // Conteo de elementos dentro del buffer
+        let count = 0;
+        collection?.features.forEach((f) => {
+          if (f.id === selectedFeature.id) return;
+          const lyr = L.geoJSON(f as never);
+          const b = lyr.getBounds();
+          if (b.isValid() && center.distanceTo(b.getCenter()) <= bufferMeters) {
+            count++;
+          }
+        });
+        setBufferCount(count);
         map.fitBounds(circle.getBounds().pad(0.2));
       }
     }
-  }, [bufferDistance, selectedFeature]);
+  }, [activeTool, bufferMeters, collection, selectedFeature]);
 
-  const focusFeature = useCallback((feature: AssetFeature) => {
-    setSelectedId(feature.id ?? null);
-    setBufferDistance(0);
+  // Análisis de Vecino Más Próximo
+  const runNearestAnalysis = useCallback(() => {
     const map = mapRef.current;
     const L = leafletRef.current;
-    if (!map || !L) return;
-    const focusLayer = L.geoJSON(feature as never);
-    const bounds = focusLayer.getBounds();
-    if (bounds.isValid()) map.fitBounds(bounds.pad(0.55), { maxZoom: 18 });
-  }, []);
+    if (!map || !L || !selectedFeature || !collection) return;
+
+    if (nearestLineRef.current) {
+      map.removeLayer(nearestLineRef.current);
+      nearestLineRef.current = null;
+    }
+
+    const currentLayer = L.geoJSON(selectedFeature as never);
+    const currentBounds = currentLayer.getBounds();
+    if (!currentBounds.isValid()) return;
+    const currentCenter = currentBounds.getCenter();
+
+    let minDistance = Infinity;
+    let closestFeature: AssetFeature | null = null;
+    let closestCenter: LatLng | null = null;
+
+    collection.features.forEach((f) => {
+      if (f.id === selectedFeature.id) return;
+      const otherLayer = L.geoJSON(f as never);
+      const otherBounds = otherLayer.getBounds();
+      if (otherBounds.isValid()) {
+        const otherCenter = otherBounds.getCenter();
+        const dist = currentCenter.distanceTo(otherCenter);
+        if (dist < minDistance) {
+          minDistance = dist;
+          closestFeature = f;
+          closestCenter = otherCenter;
+        }
+      }
+    });
+
+    if (closestFeature && closestCenter) {
+      const line = L.polyline([currentCenter, closestCenter], {
+        color: "#ec4899",
+        weight: 3,
+        dashArray: "4, 6",
+      }).addTo(map);
+      nearestLineRef.current = line;
+
+      setNearestResult({
+        name: (closestFeature as AssetFeature).properties.nombre ?? "Activo vecino",
+        distance: Math.round(minDistance),
+      });
+
+      map.fitBounds(line.getBounds().pad(0.3));
+    }
+  }, [collection, selectedFeature]);
 
   const fitAll = useCallback(() => {
     const map = mapRef.current;
@@ -390,9 +514,10 @@ export function Rn174Viewer() {
       <header className="topbar">
         <div className="brand-lockup">
           <div className="route-shield" aria-hidden="true"><span>RN</span><strong>174</strong></div>
-          <div><p className="eyebrow">Inventario vial · SIG</p><h1>Visor de activos</h1></div>
+          <div><p className="eyebrow">Sistema de Información Geográfica</p><h1>Plataforma Vial Digital</h1></div>
         </div>
 
+        {/* BARRA SUPERIOR GIS */}
         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
           {/* Selector de Mapa Base */}
           <div style={{ display: "flex", background: "rgba(255,255,255,0.08)", padding: "2px", borderRadius: "8px" }}>
@@ -500,7 +625,15 @@ export function Rn174Viewer() {
               const selected = feature.id === selectedId;
               const assetTypeName = properties.tipo_activo ?? properties.tipo ?? GEOMETRY_LABELS[geometry];
               return (
-                <button type="button" key={feature.id} className={`asset-card ${selected ? "selected" : ""}`} onClick={() => focusFeature(feature)}>
+                <button
+                  type="button"
+                  key={feature.id}
+                  className={`asset-card ${selected ? "selected" : ""}`}
+                  onClick={() => {
+                    setSelectedId(feature.id ?? null);
+                    if (activeTool === "NEAREST") setNearestResult(null);
+                  }}
+                >
                   <span className="asset-mark" style={{ "--asset-color": GEOMETRY_COLORS[geometry] } as React.CSSProperties}><AssetMark geometry={geometry} /></span>
                   <span className="asset-copy">
                     <span className="asset-title">{displayValue(properties.nombre, "Activo sin nombre")}</span>
@@ -522,15 +655,197 @@ export function Rn174Viewer() {
 
         <section className="map-panel" aria-label="Mapa de activos RN 174">
           <div ref={mapNodeRef} className="map-canvas" />
-          <div className="map-topline">
+
+          {/* BARRA FLOTANTE DE HERRAMIENTAS GIS (TOOLBOX) */}
+          <div style={{
+            position: "absolute",
+            top: "16px",
+            right: "16px",
+            zIndex: 1000,
+            display: "flex",
+            flexDirection: "column",
+            gap: "6px",
+            background: "rgba(15, 23, 42, 0.9)",
+            backdropFilter: "blur(8px)",
+            padding: "6px",
+            borderRadius: "10px",
+            boxShadow: "0 10px 25px rgba(0,0,0,0.5)",
+            border: "1px solid rgba(255,255,255,0.15)"
+          }}>
+            <button
+              type="button"
+              onClick={() => setActiveTool(activeTool === "MEASURE" ? "NONE" : "MEASURE")}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: "8px 12px",
+                borderRadius: "6px",
+                border: "none",
+                background: activeTool === "MEASURE" ? "#f43f5e" : "transparent",
+                color: "#ffffff",
+                fontSize: "0.8rem",
+                fontWeight: 600,
+                cursor: "pointer"
+              }}
+              title="Medir distancia haciendo clics en el mapa"
+            >
+              <Ruler size={16} /> <span>Medir</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTool(activeTool === "BUFFER" ? "NONE" : "BUFFER")}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: "8px 12px",
+                borderRadius: "6px",
+                border: "none",
+                background: activeTool === "BUFFER" ? "#f59e0b" : "transparent",
+                color: "#ffffff",
+                fontSize: "0.8rem",
+                fontWeight: 600,
+                cursor: "pointer"
+              }}
+              title="Generar área de influencia alrededor del activo"
+            >
+              <CircleDot size={16} /> <span>Buffer</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTool(activeTool === "NEAREST" ? "NONE" : "NEAREST");
+                if (activeTool !== "NEAREST") runNearestAnalysis();
+              }}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: "8px 12px",
+                borderRadius: "6px",
+                border: "none",
+                background: activeTool === "NEAREST" ? "#ec4899" : "transparent",
+                color: "#ffffff",
+                fontSize: "0.8rem",
+                fontWeight: 600,
+                cursor: "pointer"
+              }}
+              title="Calcular activo vecino más cercano"
+            >
+              <Target size={16} /> <span>Proximidad</span>
+            </button>
+          </div>
+
+          {/* PANEL INFORMATIVO DE LA HERRAMIENTA ACTIVA */}
+          {activeTool === "MEASURE" && (
+            <div style={{
+              position: "absolute",
+              top: "16px",
+              left: "16px",
+              zIndex: 1000,
+              background: "rgba(15, 23, 42, 0.95)",
+              color: "#ffffff",
+              padding: "12px 16px",
+              borderRadius: "8px",
+              border: "1px solid #f43f5e",
+              boxShadow: "0 10px 25px rgba(0,0,0,0.5)"
+            }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
+                <div>
+                  <span style={{ fontSize: "0.75rem", color: "#fda4af", textTransform: "uppercase", fontWeight: "bold" }}>Regla Activa</span>
+                  <p style={{ margin: "2px 0", fontSize: "1.1rem", fontWeight: "bold" }}>
+                    {totalDistance >= 1000 ? `${(totalDistance / 1000).toFixed(2)} km` : `${totalDistance} m`}
+                  </p>
+                  <small style={{ color: "#94a3b8" }}>Haz clics en el mapa para trazar la ruta</small>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { setMeasurePoints([]); setTotalDistance(0); }}
+                  style={{ background: "rgba(255,255,255,0.1)", border: "none", color: "#fff", padding: "6px", borderRadius: "6px", cursor: "pointer" }}
+                  title="Borrar trazo"
+                >
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {activeTool === "BUFFER" && (
+            <div style={{
+              position: "absolute",
+              top: "16px",
+              left: "16px",
+              zIndex: 1000,
+              background: "rgba(15, 23, 42, 0.95)",
+              color: "#ffffff",
+              padding: "12px 16px",
+              borderRadius: "8px",
+              border: "1px solid #f59e0b",
+              boxShadow: "0 10px 25px rgba(0,0,0,0.5)",
+              minWidth: "240px"
+            }}>
+              <span style={{ fontSize: "0.75rem", color: "#fcd34d", textTransform: "uppercase", fontWeight: "bold" }}>Área de Influencia</span>
+              <p style={{ margin: "4px 0", fontSize: "0.85rem" }}>
+                Activo: <strong>{selectedFeature?.properties?.nombre || "Toca un elemento"}</strong>
+              </p>
+              <div style={{ margin: "8px 0" }}>
+                <input
+                  type="range"
+                  min="20"
+                  max="1500"
+                  step="20"
+                  value={bufferMeters}
+                  onChange={(e) => setBufferMeters(Number(e.target.value))}
+                  style={{ width: "100%", cursor: "pointer" }}
+                />
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "#94a3b8" }}>
+                  <span>20m</span>
+                  <strong style={{ color: "#f59e0b" }}>{bufferMeters} m</strong>
+                  <span>1.5 km</span>
+                </div>
+              </div>
+              {bufferCount !== null && (
+                <div style={{ background: "rgba(245,158,11,0.15)", padding: "6px 8px", borderRadius: "6px", fontSize: "0.8rem" }}>
+                  📊 <strong>{bufferCount} activos</strong> encontrados en el radio.
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTool === "NEAREST" && nearestResult && (
+            <div style={{
+              position: "absolute",
+              top: "16px",
+              left: "16px",
+              zIndex: 1000,
+              background: "rgba(15, 23, 42, 0.95)",
+              color: "#ffffff",
+              padding: "12px 16px",
+              borderRadius: "8px",
+              border: "1px solid #ec4899",
+              boxShadow: "0 10px 25px rgba(0,0,0,0.5)"
+            }}>
+              <span style={{ fontSize: "0.75rem", color: "#f472b6", textTransform: "uppercase", fontWeight: "bold" }}>Vecino Más Cercano</span>
+              <p style={{ margin: "4px 0", fontSize: "0.9rem", fontWeight: "bold" }}>{nearestResult.name}</p>
+              <p style={{ margin: 0, fontSize: "0.85rem", color: "#ec4899" }}>
+                Distancia en línea recta: <strong>{nearestResult.distance >= 1000 ? `${(nearestResult.distance / 1000).toFixed(2)} km` : `${nearestResult.distance} m`}</strong>
+              </p>
+            </div>
+          )}
+
+          <div className="map-topline" style={{ left: activeTool !== "NONE" ? "280px" : "16px", transition: "left 0.2s" }}>
             <div><ShieldCheck aria-hidden="true" /><span>SIG en vivo</span></div>
             <button type="button" onClick={fitAll}><LocateFixed aria-hidden="true" /> Ver todos</button>
           </div>
+
           <div className="map-legend" aria-label="Leyenda del mapa">
             {(Object.keys(GEOMETRY_LABELS) as GeometryClass[]).map((geometry) => <span key={geometry}><i style={{ backgroundColor: GEOMETRY_COLORS[geometry] }} />{GEOMETRY_LABELS[geometry]}</span>)}
           </div>
 
-          {/* Ficha técnica con Buffer */}
+          {/* FICHA TÉCNICA PRECISA */}
           {selectedFeature && (
             <article className="detail-card">
               <div className="detail-accent" style={{ background: GEOMETRY_COLORS[geometryClass(selectedFeature)] }} />
@@ -539,33 +854,7 @@ export function Rn174Viewer() {
                   <span className="detail-type">{GEOMETRY_LABELS[geometryClass(selectedFeature)]} · {displayValue(selectedFeature.properties.tipo_activo ?? selectedFeature.properties.tipo)}</span>
                   <h2>{displayValue(selectedFeature.properties.nombre, "Activo")}</h2>
                 </div>
-                <button type="button" onClick={() => { setSelectedId(null); setBufferDistance(0); }} aria-label="Cerrar detalle"><X aria-hidden="true" /></button>
-              </div>
-
-              {/* Botones de Buffer */}
-              <div style={{ margin: "10px 0", padding: "8px", background: "rgba(255,255,255,0.05)", borderRadius: "8px" }}>
-                <span style={{ fontSize: "0.78rem", fontWeight: "bold", color: "#f59e0b", display: "block", marginBottom: "6px" }}>⭕ Área de Influencia (Buffer)</span>
-                <div style={{ display: "flex", gap: "6px" }}>
-                  {[50, 100, 500, 1000].map((d) => (
-                    <button
-                      key={d}
-                      type="button"
-                      onClick={() => setBufferDistance(bufferDistance === d ? 0 : d)}
-                      style={{
-                        flex: 1,
-                        padding: "4px 0",
-                        borderRadius: "4px",
-                        border: "1px solid rgba(255,255,255,0.15)",
-                        background: bufferDistance === d ? "#f59e0b" : "transparent",
-                        color: "#ffffff",
-                        fontSize: "0.72rem",
-                        cursor: "pointer",
-                      }}
-                    >
-                      {d >= 1000 ? "1 km" : `${d}m`}
-                    </button>
-                  ))}
-                </div>
+                <button type="button" onClick={() => setSelectedId(null)} aria-label="Cerrar detalle"><X aria-hidden="true" /></button>
               </div>
 
               <div className="detail-grid">
