@@ -1,25 +1,9 @@
 "use client";
 
 import {
-  AlertTriangle,
-  ArrowUpRight,
-  Circle,
-  CircleDot,
-  Compass,
   Crosshair,
-  Layers,
-  Layers3,
-  Locate,
-  LocateFixed,
-  Map as MapIcon,
-  MapPinned,
-  Maximize2,
-  Navigation,
   RefreshCw,
-  Route,
-  Ruler,
   Search,
-  ShieldCheck,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -48,7 +32,7 @@ type AssetProperties = {
 type AssetFeature = {
   type: "Feature";
   id?: string;
-  geometry: { type: string; coordinates: any };
+  geometry: { type: string; coordinates: unknown };
   properties: AssetProperties;
 };
 
@@ -79,12 +63,12 @@ const BASEMAPS = {
   SATELITE: {
     name: "Satélite HD (Esri)",
     url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-    attribution: "Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics",
+    attribution: "Tiles &copy; Esri",
   },
   TOPOGRAFICO: {
     name: "Topográfico",
     url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-    attribution: "Map data: &copy; OpenStreetMap, SRTM | Map style: &copy; OpenTopoMap",
+    attribution: "Map data &copy; OpenStreetMap, SRTM",
   },
 };
 
@@ -108,9 +92,9 @@ function geometryClass(feature: AssetFeature): GeometryClass {
   return "POLIGONO";
 }
 
-function getFeatureCenter(feature: AssetFeature, L: any): [number, number] | null {
+function getFeatureCenter(feature: AssetFeature, L: typeof import("leaflet")): [number, number] | null {
   try {
-    const layer = L.geoJSON(feature);
+    const layer = L.geoJSON(feature as never);
     const bounds = layer.getBounds();
     if (bounds.isValid()) {
       const center = bounds.getCenter();
@@ -131,12 +115,10 @@ export function Rn174Viewer() {
   const [baseMap, setBaseMap] = useState<keyof typeof BASEMAPS>("CALLES");
   const [activeTab, setActiveTab] = useState<"capas" | "analisis">("capas");
 
-  // Herramientas SIG
+  // Herramientas de Análisis SIG
   const [bufferDistance, setBufferDistance] = useState<number>(0);
   const [bufferCount, setBufferCount] = useState<number | null>(null);
   const [nearestAsset, setNearestAsset] = useState<{ name: string; distance: number } | null>(null);
-  const [measuring, setMeasuring] = useState(false);
-  const [measuredDistance, setMeasuredDistance] = useState<number | null>(null);
 
   const mapNodeRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<LeafletMap | null>(null);
@@ -234,9 +216,9 @@ export function Rn174Viewer() {
 
     layerRef.current?.remove();
 
-    const layer = L.geoJSON(collection as any, {
+    const layer = L.geoJSON(collection as never, {
       pointToLayer: (feature, latlng) => {
-        const isSelected = feature.id === selectedId;
+        const isSelected = String(feature.id) === selectedId;
         return L.circleMarker(latlng, {
           radius: isSelected ? 10 : 7,
           color: "#ffffff",
@@ -246,8 +228,8 @@ export function Rn174Viewer() {
         });
       },
       style: (feature) => {
-        const geom = geometryClass(feature as any);
-        const isSelected = feature?.id === selectedId;
+        const geom = geometryClass(feature as AssetFeature);
+        const isSelected = String(feature?.id) === selectedId;
         const color = GEOMETRY_COLORS[geom];
         return {
           color,
@@ -258,11 +240,12 @@ export function Rn174Viewer() {
       },
       onEachFeature: (feature, leafletLayer) => {
         leafletLayer.on("click", () => {
-          setSelectedId(feature.id);
+          setSelectedId(String(feature.id ?? ""));
           setBufferDistance(0);
           setNearestAsset(null);
         });
-        leafletLayer.bindTooltip(feature.properties?.nombre || "Activo", {
+        const label = feature.properties?.nombre || "Activo";
+        leafletLayer.bindTooltip(label, {
           sticky: true,
           direction: "top",
         });
@@ -272,7 +255,7 @@ export function Rn174Viewer() {
     layerRef.current = layer;
   }, [collection, selectedId]);
 
-  // Ejecutar Análisis de Buffer y Próximos
+  // Ejecutar Análisis de Buffer
   useEffect(() => {
     const L = leafletRef.current;
     const map = mapRef.current;
@@ -287,7 +270,6 @@ export function Rn174Viewer() {
     const center = getFeatureCenter(selectedFeature, L);
     if (!center) return;
 
-    // 1. Dibujar Buffer si está activo
     if (bufferDistance > 0) {
       const circle = L.circle(center, {
         radius: bufferDistance,
@@ -298,7 +280,6 @@ export function Rn174Viewer() {
         fillOpacity: 0.18,
       }).addTo(analysisGroup);
 
-      // Conteo de activos dentro del Buffer
       let count = 0;
       collection?.features.forEach((f) => {
         if (f.id === selectedFeature.id) return;
@@ -356,7 +337,7 @@ export function Rn174Viewer() {
       }).addTo(analysisGroup);
 
       setNearestAsset({
-        name: (closest as AssetFeature).properties.nombre || "Activo cercano",
+        name: closest.properties?.nombre || "Activo cercano",
         distance: Math.round(minDistance),
       });
 
@@ -370,7 +351,7 @@ export function Rn174Viewer() {
     const L = leafletRef.current;
     if (!map || !L) return;
     map.locate({ setView: true, maxZoom: 16 });
-    map.once("locationfound", (e: any) => {
+    map.once("locationfound", (e: { latlng: [number, number] }) => {
       L.circleMarker(e.latlng, { radius: 8, color: "#2563eb", fillColor: "#60a5fa", fillOpacity: 0.9 })
         .addTo(map)
         .bindPopup("Estás aquí")
@@ -386,9 +367,8 @@ export function Rn174Viewer() {
           <div><p className="eyebrow">Geovisor SIG vial</p><h1>Analítica de Activos</h1></div>
         </div>
 
-        {/* Barra de Herramientas Superior */}
+        {/* Selector de Mapa Base y Botones */}
         <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-          {/* Selector de Mapa Base */}
           <div style={{ display: "flex", background: "rgba(255,255,255,0.08)", padding: "3px", borderRadius: "8px" }}>
             {(Object.keys(BASEMAPS) as (keyof typeof BASEMAPS)[]).map((key) => (
               <button
@@ -414,7 +394,7 @@ export function Rn174Viewer() {
           <button className="icon-button" onClick={handleLocateMe} title="Mi ubicación GPS">
             <Crosshair size={18} />
           </button>
-          <button className="icon-button" onClick={() => void loadAssets()} title="Actualizar datos de Supabase">
+          <button className="icon-button" onClick={() => void loadAssets()} title="Actualizar datos">
             <RefreshCw size={18} className={loading ? "spin" : ""} />
           </button>
         </div>
@@ -422,7 +402,7 @@ export function Rn174Viewer() {
 
       <section className="workspace">
         <aside className="sidebar">
-          {/* Selector de Pestañas: Capas vs Herramientas */}
+          {/* Pestañas */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", margin: "0.75rem 1rem 0" }}>
             <button
               type="button"
@@ -471,14 +451,15 @@ export function Rn174Viewer() {
               </label>
 
               <div className="asset-list">
+                {error && <div className="error-state"><p>{error}</p></div>}
                 {collection?.features
                   .filter((f) => normalize(f.properties.nombre).includes(normalize(query)))
                   .map((feature) => (
                     <button
-                      key={feature.id}
+                      key={feature.id ?? String(feature.properties?.codigo)}
                       type="button"
                       className={`asset-card ${feature.id === selectedId ? "selected" : ""}`}
-                      onClick={() => setSelectedId(feature.id)}
+                      onClick={() => setSelectedId(feature.id ?? null)}
                     >
                       <span className="asset-title">{feature.properties.nombre || "Activo sin nombre"}</span>
                       <span className="asset-meta">{feature.properties.tipo} · {GEOMETRY_LABELS[geometryClass(feature)]}</span>
@@ -487,7 +468,7 @@ export function Rn174Viewer() {
               </div>
             </>
           ) : (
-            /* PANEL DE ANÁLISIS SIG */
+            /* PANEL ANÁLISIS */
             <div style={{ padding: "1rem", display: "flex", flexDirection: "column", gap: "1.2rem" }}>
               <div style={{ background: "rgba(255,255,255,0.04)", padding: "12px", borderRadius: "8px" }}>
                 <h3 style={{ fontSize: "0.9rem", marginBottom: "8px", color: "#f59e0b" }}>⭕ Área de Influencia (Buffer)</h3>
@@ -525,7 +506,7 @@ export function Rn174Viewer() {
               <div style={{ background: "rgba(255,255,255,0.04)", padding: "12px", borderRadius: "8px" }}>
                 <h3 style={{ fontSize: "0.9rem", marginBottom: "8px", color: "#ec4899" }}>🎯 Activo Más Próximo</h3>
                 <p style={{ fontSize: "0.78rem", color: "#94a3b8", marginBottom: "10px" }}>
-                  Encuentra la distancia y el activo vecino más cercano.
+                  Encuentra el vecino más cercano al activo seleccionado.
                 </p>
                 <button
                   type="button"
@@ -549,7 +530,7 @@ export function Rn174Viewer() {
                 {nearestAsset && (
                   <div style={{ marginTop: "10px", padding: "8px", background: "rgba(236,72,153,0.15)", borderRadius: "6px", fontSize: "0.82rem" }}>
                     📍 Más cercano: <strong>{nearestAsset.name}</strong><br />
-                    📏 Distancia en línea recta: <strong>{nearestAsset.distance} metros</strong>
+                    📏 Distancia: <strong>{nearestAsset.distance} metros</strong>
                   </div>
                 )}
               </div>
