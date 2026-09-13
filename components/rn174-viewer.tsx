@@ -2,12 +2,15 @@
 
 import {
   AlertTriangle,
-  ArrowUpRight,
+  ArrowDownToLine,
+  BarChart3,
   CircleDot,
   Clock3,
   Crosshair,
   Database,
+  Download,
   Filter,
+  Layers,
   Layers3,
   LocateFixed,
   MapPinned,
@@ -15,9 +18,8 @@ import {
   Route,
   Ruler,
   Search,
-  ShieldCheck,
+  Table,
   Target,
-  Trash2,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -69,8 +71,6 @@ type AssetCollection = {
     dataset?: string;
     ruta?: string;
     es_demo?: boolean;
-    advertencia?: string;
-    progresiva?: string;
   };
 };
 
@@ -96,19 +96,6 @@ const BASEMAPS: Record<BaseMapKey, { name: string; url: string; attr: string }> 
   },
 };
 
-const FILTERS: { value: FilterValue; label: string }[] = [
-  { value: "TODOS", label: "Todos" },
-  { value: "PUNTO", label: "Puntos" },
-  { value: "LINEA", label: "Líneas" },
-  { value: "POLIGONO", label: "Superficies" },
-];
-
-const GEOMETRY_LABELS: Record<GeometryClass, string> = {
-  PUNTO: "Punto",
-  LINEA: "Línea",
-  POLIGONO: "Superficie",
-};
-
 const GEOMETRY_COLORS: Record<GeometryClass, string> = {
   PUNTO: "#f36b21",
   LINEA: "#1677b8",
@@ -124,21 +111,59 @@ const SUPABASE_PUBLISHABLE_KEY =
 const normalize = (value?: string) =>
   (value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 
-const displayValue = (value: string | number | undefined, fallback = "Sin informar") =>
+const displayValue = (value: string | number | undefined, fallback = "—") =>
   value === undefined || value === null || value === "" ? fallback : String(value);
 
 function geometryClass(feature: AssetFeature): GeometryClass {
   const declared = feature.properties.geometria;
-  if (declared && declared in GEOMETRY_LABELS) return declared;
+  if (declared === "PUNTO" || declared === "LINEA" || declared === "POLIGONO") return declared;
   if (feature.id?.startsWith("punto") || feature.geometry.type.includes("Point")) return "PUNTO";
   if (feature.id?.startsWith("linea") || feature.geometry.type.includes("Line")) return "LINEA";
   return "POLIGONO";
 }
 
-function AssetMark({ geometry }: { geometry: GeometryClass }) {
-  if (geometry === "PUNTO") return <CircleDot aria-hidden="true" />;
-  if (geometry === "LINEA") return <Route aria-hidden="true" />;
-  return <Layers3 aria-hidden="true" />;
+// ESCUDO OFICIAL DE VIALIDAD NACIONAL ARGENTINA (RN 174)
+function OfficialRn174Shield() {
+  return (
+    <div style={{
+      width: "52px",
+      height: "64px",
+      background: "#ffffff",
+      borderRadius: "8px 8px 26px 26px",
+      border: "3px solid #111827",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      boxShadow: "0 4px 10px rgba(0,0,0,0.3)",
+      overflow: "hidden",
+      flexShrink: 0,
+    }}>
+      <span style={{ fontSize: "6px", fontWeight: "900", color: "#111827", letterSpacing: "0.5px", marginTop: "2px" }}>
+        ARGENTINA
+      </span>
+      {/* Franja RA con bandera */}
+      <div style={{
+        width: "100%",
+        height: "14px",
+        background: "#111827",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        padding: "0 3px",
+        margin: "1px 0",
+      }}>
+        <span style={{ color: "#ffffff", fontSize: "7px", fontWeight: "bold" }}>RA</span>
+        <div style={{ width: "16px", height: "9px", display: "flex", flexDirection: "column", borderRadius: "1px", overflow: "hidden" }}>
+          <div style={{ flex: 1, background: "#75aadb" }} />
+          <div style={{ flex: 1, background: "#ffffff" }} />
+          <div style={{ flex: 1, background: "#75aadb" }} />
+        </div>
+      </div>
+      <span style={{ fontSize: "19px", fontWeight: "900", color: "#111827", lineHeight: "1.1", marginTop: "2px" }}>
+        174
+      </span>
+    </div>
+  );
 }
 
 export function Rn174Viewer() {
@@ -146,17 +171,18 @@ export function Rn174Viewer() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<FilterValue>("TODOS");
-  const [selectedType, setSelectedType] = useState<string>("TODOS");
+  const [filterGeom, setFilterGeom] = useState<FilterValue>("TODOS");
+  const [filterType, setFilterType] = useState<string>("TODOS");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loadedAt, setLoadedAt] = useState<Date | null>(null);
   const [baseMap, setBaseMap] = useState<BaseMapKey>("CALLES");
+  const [activeTab, setActiveTab] = useState<"INVENTARIO" | "ANALISIS" | "TABLA">("INVENTARIO");
 
   // Herramientas GIS
   const [activeTool, setActiveTool] = useState<ActiveGisTool>("NONE");
   const [measurePoints, setMeasurePoints] = useState<LatLng[]>([]);
   const [totalDistance, setTotalDistance] = useState<number>(0);
-  const [bufferMeters, setBufferMeters] = useState<number>(100);
+  const [bufferMeters, setBufferMeters] = useState<number>(200);
   const [bufferCount, setBufferCount] = useState<number | null>(null);
   const [nearestResult, setNearestResult] = useState<{ name: string; distance: number } | null>(null);
 
@@ -173,9 +199,6 @@ export function Rn174Viewer() {
     setLoading(true);
     setError(null);
     try {
-      if (!SUPABASE_PUBLISHABLE_KEY) {
-        throw new Error("Falta configurar la clave pública.");
-      }
       const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/rn174_demo_geojson`, {
         method: "POST",
         headers: {
@@ -196,15 +219,14 @@ export function Rn174Viewer() {
           : payload.features[0]?.id ?? null,
       );
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Error al consultar Supabase.");
+      setError(caught instanceof Error ? caught.message : "Error al conectar.");
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    const initialLoad = window.setTimeout(() => void loadAssets(), 0);
-    return () => window.clearTimeout(initialLoad);
+    void loadAssets();
   }, [loadAssets]);
 
   const assetTypes = useMemo(() => {
@@ -220,23 +242,47 @@ export function Rn174Viewer() {
     const terms = normalize(query).split(/\s+/).filter(Boolean);
     return (collection?.features ?? []).filter((feature) => {
       const geometry = geometryClass(feature);
-      if (filter !== "TODOS" && geometry !== filter) return false;
+      if (filterGeom !== "TODOS" && geometry !== filterGeom) return false;
 
       const properties = feature.properties;
       const type = properties.tipo_activo ?? properties.tipo ?? "";
-      if (selectedType !== "TODOS" && type !== selectedType) return false;
+      if (filterType !== "TODOS" && type !== filterType) return false;
 
       const haystack = normalize(
         [properties.nombre, properties.codigo, type, properties.tipo_codigo, properties.familia, properties.ruta, properties.estado_validacion, properties.lote_origen].join(" "),
       );
       return terms.every((term) => haystack.includes(term));
     });
-  }, [collection, filter, query, selectedType]);
+  }, [collection, filterGeom, filterType, query]);
 
   const selectedFeature = useMemo(
     () => collection?.features.find((feature) => feature.id === selectedId) ?? null,
     [collection, selectedId],
   );
+
+  // MÉTRICAS Y KPIS VIALES PARA DECISIONES
+  const analytics = useMemo(() => {
+    const feats = visibleFeatures;
+    const totalPuntos = feats.filter((f) => geometryClass(f) === "PUNTO").length;
+    const totalLineas = feats.filter((f) => geometryClass(f) === "LINEA").length;
+    const totalPoligonos = feats.filter((f) => geometryClass(f) === "POLIGONO").length;
+
+    // Desglose por tipo de activo
+    const porTipo: Record<string, number> = {};
+    feats.forEach((f) => {
+      const key = f.properties.tipo_activo || f.properties.tipo || "Otros";
+      porTipo[key] = (porTipo[key] || 0) + 1;
+    });
+
+    // Desglose por estado de validación
+    const porEstado: Record<string, number> = {};
+    feats.forEach((f) => {
+      const est = f.properties.estado_validacion || "Borrador";
+      porEstado[est] = (porEstado[est] || 0) + 1;
+    });
+
+    return { totalPuntos, totalLineas, totalPoligonos, porTipo, porEstado };
+  }, [visibleFeatures]);
 
   // Inicializar Mapa
   useEffect(() => {
@@ -262,14 +308,12 @@ export function Rn174Viewer() {
 
       baseLayerRef.current = base;
       mapRef.current = map;
-      window.setTimeout(() => map.invalidateSize(), 0);
     }
     void createMap();
     return () => {
       active = false;
       mapRef.current?.remove();
       mapRef.current = null;
-      layerRef.current = null;
     };
   }, []);
 
@@ -289,7 +333,7 @@ export function Rn174Viewer() {
     next.bringToBack();
   }, [baseMap]);
 
-  // Dibujar vectoriales
+  // Dibujar elementos vectoriales
   useEffect(() => {
     const L = leafletRef.current;
     const map = mapRef.current;
@@ -304,7 +348,7 @@ export function Rn174Viewer() {
           return L.circleMarker(latlng, {
             radius: selected ? 11 : 8,
             color: "#ffffff",
-            weight: selected ? 4 : 3,
+            weight: selected ? 4 : 2,
             fillColor: GEOMETRY_COLORS[geometry] ?? GEOMETRY_COLORS.PUNTO,
             fillOpacity: 1,
           });
@@ -316,7 +360,7 @@ export function Rn174Viewer() {
           return {
             color,
             fillColor: color,
-            fillOpacity: geometry === "POLIGONO" ? (selected ? 0.42 : 0.25) : 0,
+            fillOpacity: geometry === "POLIGONO" ? (selected ? 0.45 : 0.22) : 0,
             weight: selected ? 7 : geometry === "LINEA" ? 5 : 3,
             opacity: 0.95,
           };
@@ -333,7 +377,7 @@ export function Rn174Viewer() {
     layerRef.current = layer;
   }, [collection, selectedId, visibleFeatures]);
 
-  // Modo Medición Interactiva
+  // Medición Interactiva
   useEffect(() => {
     const map = mapRef.current;
     const L = leafletRef.current;
@@ -369,25 +413,18 @@ export function Rn174Viewer() {
     };
   }, [activeTool]);
 
-  // Dibujar línea de medición
   useEffect(() => {
     const map = mapRef.current;
     const L = leafletRef.current;
     if (!map || !L || activeTool !== "MEASURE") return;
-
     if (measureLineRef.current) map.removeLayer(measureLineRef.current);
-
     if (measurePoints.length > 0) {
-      const line = L.polyline(measurePoints, {
-        color: "#f43f5e",
-        weight: 4,
-        dashArray: "6, 8",
-      }).addTo(map);
+      const line = L.polyline(measurePoints, { color: "#f43f5e", weight: 4, dashArray: "6, 8" }).addTo(map);
       measureLineRef.current = line;
     }
   }, [activeTool, measurePoints]);
 
-  // Buffer y Análisis Espacial
+  // Buffer interactivo
   useEffect(() => {
     const map = mapRef.current;
     const L = leafletRef.current;
@@ -414,7 +451,6 @@ export function Rn174Viewer() {
         }).addTo(map);
         bufferLayerRef.current = circle;
 
-        // Conteo de elementos dentro del buffer
         let count = 0;
         collection?.features.forEach((f) => {
           if (f.id === selectedFeature.id) return;
@@ -430,7 +466,7 @@ export function Rn174Viewer() {
     }
   }, [activeTool, bufferMeters, collection, selectedFeature]);
 
-  // Análisis de Vecino Más Próximo
+  // Vecino más próximo
   const runNearestAnalysis = useCallback(() => {
     const map = mapRef.current;
     const L = leafletRef.current;
@@ -482,6 +518,46 @@ export function Rn174Viewer() {
     }
   }, [collection, selectedFeature]);
 
+  // EXPORTACIÓN A EXCEL / CSV
+  const exportToCSV = () => {
+    if (!visibleFeatures.length) return;
+    const headers = ["ID", "Nombre", "Tipo", "Geometría", "Ruta", "Estado", "Ciclo de Vida", "Lote", "Observaciones"];
+    const rows = visibleFeatures.map((f) => [
+      f.id,
+      `"${f.properties.nombre || ""}"`,
+      `"${f.properties.tipo_activo || f.properties.tipo || ""}"`,
+      geometryClass(f),
+      f.properties.ruta || "RN174",
+      f.properties.estado_validacion || "",
+      f.properties.estado_ciclo_vida || "",
+      `"${f.properties.lote_origen || ""}"`,
+      `"${f.properties.observaciones || ""}"`,
+    ]);
+    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map((e) => e.join(","))].join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `RN174_Inventario_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // EXPORTACIÓN A GEOJSON (Para QGIS/AutoCAD)
+  const exportToGeoJSON = () => {
+    if (!visibleFeatures.length) return;
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify({
+      type: "FeatureCollection",
+      features: visibleFeatures
+    }, null, 2));
+    const link = document.createElement("a");
+    link.setAttribute("href", dataStr);
+    link.setAttribute("download", `RN174_Capas_${new Date().toISOString().slice(0, 10)}.geojson`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const fitAll = useCallback(() => {
     const map = mapRef.current;
     const layer = layerRef.current;
@@ -503,23 +579,24 @@ export function Rn174Viewer() {
     });
   }, []);
 
-  const counts = useMemo(() => {
-    const base = { PUNTO: 0, LINEA: 0, POLIGONO: 0 };
-    for (const feature of collection?.features ?? []) base[geometryClass(feature)] += 1;
-    return base;
-  }, [collection]);
-
   return (
     <main className="app-shell">
-      <header className="topbar">
-        <div className="brand-lockup">
-          <div className="route-shield" aria-hidden="true"><span>RN</span><strong>174</strong></div>
-          <div><p className="eyebrow">Sistema de Información Geográfica</p><h1>Plataforma Vial Digital</h1></div>
+      {/* HEADER CON ESCUDO OFICIAL VIALIDAD NACIONAL */}
+      <header className="topbar" style={{ padding: "0.4rem 1.2rem", background: "#0f172a", borderBottom: "2px solid #334155" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
+          <OfficialRn174Shield />
+          <div>
+            <span style={{ fontSize: "0.72rem", textTransform: "uppercase", color: "#94a3b8", letterSpacing: "1px", fontWeight: "bold" }}>
+              DIRECCIÓN NACIONAL DE VIALIDAD · DISTRITO XVII
+            </span>
+            <h1 style={{ fontSize: "1.25rem", margin: 0, fontWeight: "900", color: "#f8fafc", letterSpacing: "-0.5px" }}>
+              Sistema de Gestión de Activos Vial RN 174
+            </h1>
+          </div>
         </div>
 
-        {/* BARRA SUPERIOR GIS */}
-        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-          {/* Selector de Mapa Base */}
+        {/* BARRA SUPERIOR: HERRAMIENTAS Y MAPAS BASE */}
+        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
           <div style={{ display: "flex", background: "rgba(255,255,255,0.08)", padding: "2px", borderRadius: "8px" }}>
             {(Object.keys(BASEMAPS) as BaseMapKey[]).map((key) => (
               <button
@@ -527,7 +604,7 @@ export function Rn174Viewer() {
                 type="button"
                 onClick={() => setBaseMap(key)}
                 style={{
-                  padding: "4px 8px",
+                  padding: "4px 10px",
                   borderRadius: "6px",
                   border: "none",
                   background: baseMap === key ? "#2563eb" : "transparent",
@@ -543,132 +620,274 @@ export function Rn174Viewer() {
           </div>
 
           <button className="icon-button" type="button" onClick={handleLocateMe} title="Mi ubicación GPS">
-            <Crosshair aria-hidden="true" />
+            <Crosshair size={18} />
           </button>
           <button className="icon-button" type="button" onClick={() => void loadAssets()} aria-label="Actualizar datos" title="Actualizar datos">
-            <RefreshCw className={loading ? "spin" : ""} aria-hidden="true" />
+            <RefreshCw size={18} className={loading ? "spin" : ""} />
           </button>
         </div>
       </header>
 
       <section className="workspace">
-        <aside className="sidebar" aria-label="Inventario publicado">
-          <div className="demo-banner">
-            <AlertTriangle aria-hidden="true" />
-            <div><strong>Geovisor SIG Dinámico</strong><span>Sincronizado con Supabase y QGIS</span></div>
+        {/* PANEL LATERAL DE GESTIÓN Y TOMA DE DECISIONES */}
+        <aside className="sidebar" style={{ display: "flex", flexDirection: "column" }}>
+          {/* PESTAÑAS DEL PANEL */}
+          <div style={{ display: "flex", borderBottom: "1px solid rgba(255,255,255,0.1)", background: "rgba(0,0,0,0.25)" }}>
+            <button
+              type="button"
+              onClick={() => setActiveTab("INVENTARIO")}
+              style={{
+                flex: 1,
+                padding: "10px 4px",
+                border: "none",
+                borderBottom: activeTab === "INVENTARIO" ? "3px solid #2563eb" : "none",
+                background: "transparent",
+                color: activeTab === "INVENTARIO" ? "#ffffff" : "#94a3b8",
+                cursor: "pointer",
+                fontSize: "0.8rem",
+                fontWeight: "bold",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "5px"
+              }}
+            >
+              <Layers size={15} /> Capas
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("ANALISIS")}
+              style={{
+                flex: 1,
+                padding: "10px 4px",
+                border: "none",
+                borderBottom: activeTab === "ANALISIS" ? "3px solid #2563eb" : "none",
+                background: "transparent",
+                color: activeTab === "ANALISIS" ? "#ffffff" : "#94a3b8",
+                cursor: "pointer",
+                fontSize: "0.8rem",
+                fontWeight: "bold",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "5px"
+              }}
+            >
+              <BarChart3 size={15} /> Analítica
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("TABLA")}
+              style={{
+                flex: 1,
+                padding: "10px 4px",
+                border: "none",
+                borderBottom: activeTab === "TABLA" ? "3px solid #2563eb" : "none",
+                background: "transparent",
+                color: activeTab === "TABLA" ? "#ffffff" : "#94a3b8",
+                cursor: "pointer",
+                fontSize: "0.8rem",
+                fontWeight: "bold",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "5px"
+              }}
+            >
+              <Table size={15} /> Tabla
+            </button>
           </div>
 
-          <div className="sidebar-heading">
-            <div><p className="section-kicker">Ruta {collection?.metadata?.ruta ?? "RN174"}</p><h2>Activos publicados</h2></div>
-            <span className="total-badge">{visibleFeatures.length} / {collection?.features.length ?? 0}</span>
-          </div>
+          {activeTab === "INVENTARIO" && (
+            <div style={{ padding: "10px", display: "flex", flexDirection: "column", gap: "10px", flex: 1, overflowY: "auto" }}>
+              {/* Buscador */}
+              <label className="search-box" style={{ margin: 0 }}>
+                <Search size={16} />
+                <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar elemento o progresiva..." />
+                {query && <button type="button" onClick={() => setQuery("")}><X size={14} /></button>}
+              </label>
 
-          <div className="metrics" aria-label="Resumen por geometría">
-            <div><CircleDot aria-hidden="true" /><strong>{counts.PUNTO}</strong><span>Punto</span></div>
-            <div><Route aria-hidden="true" /><strong>{counts.LINEA}</strong><span>Línea</span></div>
-            <div><Layers3 aria-hidden="true" /><strong>{counts.POLIGONO}</strong><span>Superficie</span></div>
-          </div>
+              {/* Selector desplegable de Tipo */}
+              {assetTypes.length > 0 && (
+                <select
+                  value={filterType}
+                  onChange={(e) => setFilterType(e.target.value)}
+                  style={{
+                    width: "100%",
+                    padding: "7px 10px",
+                    borderRadius: "6px",
+                    background: "#1e293b",
+                    color: "#ffffff",
+                    border: "1px solid rgba(255,255,255,0.15)",
+                    fontSize: "0.8rem",
+                  }}
+                >
+                  <option value="TODOS">Todos los tipos de activo ({assetTypes.length})</option>
+                  {assetTypes.map((t) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+              )}
 
-          {/* Buscador */}
-          <label className="search-box">
-            <Search aria-hidden="true" />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar elemento por nombre o código..." />
-            {query && <button type="button" onClick={() => setQuery("")} aria-label="Borrar búsqueda"><X aria-hidden="true" /></button>}
-          </label>
-
-          {/* Selector desplegable de Tipo de Activo */}
-          {assetTypes.length > 0 && (
-            <div style={{ margin: "0 1rem 0.5rem" }}>
-              <select
-                value={selectedType}
-                onChange={(e) => setSelectedType(e.target.value)}
-                style={{
-                  width: "100%",
-                  padding: "6px 10px",
-                  borderRadius: "6px",
-                  background: "#1e293b",
-                  color: "#ffffff",
-                  border: "1px solid rgba(255,255,255,0.15)",
-                  fontSize: "0.8rem",
-                  cursor: "pointer",
-                }}
-              >
-                <option value="TODOS">Todos los tipos de activo ({assetTypes.length})</option>
-                {assetTypes.map((t) => (
-                  <option key={t} value={t}>{t}</option>
+              {/* Filtros por Geometría */}
+              <div className="filter-row" style={{ margin: 0 }}>
+                <Filter size={15} />
+                {(["TODOS", "PUNTO", "LINEA", "POLIGONO"] as FilterValue[]).map((val) => (
+                  <button
+                    key={val}
+                    type="button"
+                    className={filterGeom === val ? "active" : ""}
+                    onClick={() => setFilterGeom(val)}
+                  >
+                    {val === "TODOS" ? "Todos" : val === "PUNTO" ? "Puntos" : val === "LINEA" ? "Líneas" : "Superficies"}
+                  </button>
                 ))}
-              </select>
+              </div>
+
+              {/* Lista de Activos */}
+              <div className="asset-list" style={{ flex: 1, overflowY: "auto" }}>
+                {visibleFeatures.map((f) => {
+                  const geom = geometryClass(f);
+                  const isSel = f.id === selectedId;
+                  return (
+                    <button
+                      key={f.id}
+                      type="button"
+                      className={`asset-card ${isSel ? "selected" : ""}`}
+                      onClick={() => setSelectedId(f.id ?? null)}
+                    >
+                      <span className="asset-mark" style={{ "--asset-color": GEOMETRY_COLORS[geom] } as React.CSSProperties}>
+                        <span style={{ fontSize: "1rem" }}>●</span>
+                      </span>
+                      <span className="asset-copy">
+                        <span className="asset-title">{f.properties.nombre || "Activo sin nombre"}</span>
+                        <span className="asset-meta">{f.properties.tipo_activo || f.properties.tipo || geom}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           )}
 
-          {/* Filtro por Geometría */}
-          <div className="filter-row" aria-label="Filtrar por geometría">
-            <Filter aria-hidden="true" />
-            {FILTERS.map((item) => (
-              <button type="button" key={item.value} className={filter === item.value ? "active" : ""} onClick={() => setFilter(item.value)}>{item.label}</button>
-            ))}
-          </div>
-
-          {/* Lista de Activos */}
-          <div className="asset-list" aria-live="polite">
-            {loading && !collection && <div className="loading-state"><span className="loading-ring" /><p>Consultando Supabase…</p></div>}
-            {error && (
-              <div className="error-state">
-                <Database aria-hidden="true" /><h3>No pudimos cargar los activos</h3><p>{error}</p>
-                <button type="button" onClick={() => void loadAssets()}><RefreshCw aria-hidden="true" /> Reintentar</button>
+          {activeTab === "ANALISIS" && (
+            <div style={{ padding: "12px", display: "flex", flexDirection: "column", gap: "12px", flex: 1, overflowY: "auto" }}>
+              {/* Tarjeta de Resumen / KPIs */}
+              <div style={{ background: "rgba(255,255,255,0.05)", padding: "12px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.1)" }}>
+                <span style={{ fontSize: "0.75rem", textTransform: "uppercase", color: "#38bdf8", fontWeight: "bold" }}>Métricas del Corredor</span>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px", marginTop: "8px" }}>
+                  <div style={{ background: "rgba(0,0,0,0.3)", padding: "8px", borderRadius: "6px", textAlign: "center" }}>
+                    <span style={{ fontSize: "1.2rem", fontWeight: "bold", color: "#f36b21", display: "block" }}>{analytics.totalPuntos}</span>
+                    <span style={{ fontSize: "0.7rem", color: "#94a3b8" }}>Puntos</span>
+                  </div>
+                  <div style={{ background: "rgba(0,0,0,0.3)", padding: "8px", borderRadius: "6px", textAlign: "center" }}>
+                    <span style={{ fontSize: "1.2rem", fontWeight: "bold", color: "#1677b8", display: "block" }}>{analytics.totalLineas}</span>
+                    <span style={{ fontSize: "0.7rem", color: "#94a3b8" }}>Líneas</span>
+                  </div>
+                  <div style={{ background: "rgba(0,0,0,0.3)", padding: "8px", borderRadius: "6px", textAlign: "center" }}>
+                    <span style={{ fontSize: "1.2rem", fontWeight: "bold", color: "#178a72", display: "block" }}>{analytics.totalPoligonos}</span>
+                    <span style={{ fontSize: "0.7rem", color: "#94a3b8" }}>Polígonos</span>
+                  </div>
+                </div>
               </div>
-            )}
-            {!loading && !error && visibleFeatures.length === 0 && <div className="empty-state"><Search aria-hidden="true" /><p>No hay activos que coincidan con el filtro.</p></div>}
-            {visibleFeatures.map((feature) => {
-              const properties = feature.properties;
-              const geometry = geometryClass(feature);
-              const selected = feature.id === selectedId;
-              const assetTypeName = properties.tipo_activo ?? properties.tipo ?? GEOMETRY_LABELS[geometry];
-              return (
-                <button
-                  type="button"
-                  key={feature.id}
-                  className={`asset-card ${selected ? "selected" : ""}`}
-                  onClick={() => {
-                    setSelectedId(feature.id ?? null);
-                    if (activeTool === "NEAREST") setNearestResult(null);
-                  }}
-                >
-                  <span className="asset-mark" style={{ "--asset-color": GEOMETRY_COLORS[geometry] } as React.CSSProperties}><AssetMark geometry={geometry} /></span>
-                  <span className="asset-copy">
-                    <span className="asset-title">{displayValue(properties.nombre, "Activo sin nombre")}</span>
-                    <span className="asset-meta">{displayValue(assetTypeName)} · {GEOMETRY_LABELS[geometry]}</span>
-                    <span className="asset-route"><MapPinned aria-hidden="true" /> {displayValue(properties.ruta, "RN174")}</span>
-                  </span>
-                  <span className="state-pill">{displayValue(properties.estado_validacion, "Sin estado")}</span>
-                </button>
-              );
-            })}
-          </div>
+
+              {/* Desglose por Tipo de Activo */}
+              <div style={{ background: "rgba(255,255,255,0.05)", padding: "12px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.1)" }}>
+                <span style={{ fontSize: "0.75rem", textTransform: "uppercase", color: "#fbbf24", fontWeight: "bold" }}>Inventario por Tipología</span>
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "8px" }}>
+                  {Object.entries(analytics.porTipo).map(([tipo, qty]) => (
+                    <div key={tipo} style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8rem", padding: "4px 0", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                      <span>{tipo}</span>
+                      <strong style={{ color: "#38bdf8" }}>{qty} un.</strong>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Desglose por Estado */}
+              <div style={{ background: "rgba(255,255,255,0.05)", padding: "12px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.1)" }}>
+                <span style={{ fontSize: "0.75rem", textTransform: "uppercase", color: "#4ade80", fontWeight: "bold" }}>Estado de Validación</span>
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "8px" }}>
+                  {Object.entries(analytics.porEstado).map(([est, qty]) => (
+                    <div key={est} style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8rem", padding: "4px 0" }}>
+                      <span>{est}</span>
+                      <span style={{ background: "rgba(74, 222, 128, 0.15)", color: "#4ade80", padding: "2px 8px", borderRadius: "10px", fontSize: "0.75rem", fontWeight: "bold" }}>{qty}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "TABLA" && (
+            <div style={{ padding: "12px", display: "flex", flexDirection: "column", gap: "10px", flex: 1 }}>
+              <span style={{ fontSize: "0.8rem", color: "#94a3b8" }}>Exportar datos filtrados actualmente ({visibleFeatures.length} elementos):</span>
+              <button
+                type="button"
+                onClick={exportToCSV}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: "8px",
+                  padding: "10px",
+                  borderRadius: "6px",
+                  border: "none",
+                  background: "#10b981",
+                  color: "#ffffff",
+                  fontWeight: "bold",
+                  cursor: "pointer",
+                  fontSize: "0.82rem"
+                }}
+              >
+                <Download size={16} /> Exportar a Excel (CSV)
+              </button>
+              <button
+                type="button"
+                onClick={exportToGeoJSON}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: "8px",
+                  padding: "10px",
+                  borderRadius: "6px",
+                  border: "none",
+                  background: "#2563eb",
+                  color: "#ffffff",
+                  fontWeight: "bold",
+                  cursor: "pointer",
+                  fontSize: "0.82rem"
+                }}
+              >
+                <ArrowDownToLine size={16} /> Exportar a GeoJSON (QGIS)
+              </button>
+            </div>
+          )}
 
           <div className="sync-note">
-            <Clock3 aria-hidden="true" />
-            <span>{loadedAt ? `Actualizado ${loadedAt.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })}` : "Esperando datos"}</span>
+            <Clock3 size={14} />
+            <span>{loadedAt ? `Actualizado ${loadedAt.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })}` : "Esperando"}</span>
             <span className="sync-source">SINCRONIZADO</span>
           </div>
         </aside>
 
-        <section className="map-panel" aria-label="Mapa de activos RN 174">
+        {/* ÁREA DE MAPA + BARRA FLOTANTE DE ANÁLISIS SIG */}
+        <section className="map-panel" style={{ position: "relative" }}>
           <div ref={mapNodeRef} className="map-canvas" />
 
-          {/* BARRA FLOTANTE DE HERRAMIENTAS GIS (TOOLBOX) */}
+          {/* BARRA DE HERRAMIENTAS SIG FLOTANTE */}
           <div style={{
             position: "absolute",
-            top: "16px",
-            right: "16px",
+            top: "14px",
+            right: "14px",
             zIndex: 1000,
             display: "flex",
-            flexDirection: "column",
+            flexDirection: "row",
             gap: "6px",
-            background: "rgba(15, 23, 42, 0.9)",
-            backdropFilter: "blur(8px)",
-            padding: "6px",
-            borderRadius: "10px",
+            background: "rgba(15, 23, 42, 0.95)",
+            padding: "4px",
+            borderRadius: "8px",
             boxShadow: "0 10px 25px rgba(0,0,0,0.5)",
             border: "1px solid rgba(255,255,255,0.15)"
           }}>
@@ -678,19 +897,18 @@ export function Rn174Viewer() {
               style={{
                 display: "flex",
                 alignItems: "center",
-                gap: "8px",
-                padding: "8px 12px",
+                gap: "6px",
+                padding: "6px 10px",
                 borderRadius: "6px",
                 border: "none",
                 background: activeTool === "MEASURE" ? "#f43f5e" : "transparent",
                 color: "#ffffff",
-                fontSize: "0.8rem",
-                fontWeight: 600,
+                fontSize: "0.78rem",
+                fontWeight: "bold",
                 cursor: "pointer"
               }}
-              title="Medir distancia haciendo clics en el mapa"
             >
-              <Ruler size={16} /> <span>Medir</span>
+              <Ruler size={15} /> <span>Medir</span>
             </button>
 
             <button
@@ -699,19 +917,18 @@ export function Rn174Viewer() {
               style={{
                 display: "flex",
                 alignItems: "center",
-                gap: "8px",
-                padding: "8px 12px",
+                gap: "6px",
+                padding: "6px 10px",
                 borderRadius: "6px",
                 border: "none",
                 background: activeTool === "BUFFER" ? "#f59e0b" : "transparent",
                 color: "#ffffff",
-                fontSize: "0.8rem",
-                fontWeight: 600,
+                fontSize: "0.78rem",
+                fontWeight: "bold",
                 cursor: "pointer"
               }}
-              title="Generar área de influencia alrededor del activo"
             >
-              <CircleDot size={16} /> <span>Buffer</span>
+              <CircleDot size={15} /> <span>Buffer</span>
             </button>
 
             <button
@@ -723,153 +940,127 @@ export function Rn174Viewer() {
               style={{
                 display: "flex",
                 alignItems: "center",
-                gap: "8px",
-                padding: "8px 12px",
+                gap: "6px",
+                padding: "6px 10px",
                 borderRadius: "6px",
                 border: "none",
                 background: activeTool === "NEAREST" ? "#ec4899" : "transparent",
                 color: "#ffffff",
-                fontSize: "0.8rem",
-                fontWeight: 600,
+                fontSize: "0.78rem",
+                fontWeight: "bold",
                 cursor: "pointer"
               }}
-              title="Calcular activo vecino más cercano"
             >
-              <Target size={16} /> <span>Proximidad</span>
+              <Target size={15} /> <span>Proximidad</span>
             </button>
           </div>
 
-          {/* PANEL INFORMATIVO DE LA HERRAMIENTA ACTIVA */}
+          {/* RESULTADO DE MEDICIÓN / BUFFER */}
           {activeTool === "MEASURE" && (
             <div style={{
               position: "absolute",
-              top: "16px",
-              left: "16px",
+              top: "60px",
+              right: "14px",
               zIndex: 1000,
               background: "rgba(15, 23, 42, 0.95)",
               color: "#ffffff",
-              padding: "12px 16px",
+              padding: "10px 14px",
               borderRadius: "8px",
               border: "1px solid #f43f5e",
-              boxShadow: "0 10px 25px rgba(0,0,0,0.5)"
             }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
-                <div>
-                  <span style={{ fontSize: "0.75rem", color: "#fda4af", textTransform: "uppercase", fontWeight: "bold" }}>Regla Activa</span>
-                  <p style={{ margin: "2px 0", fontSize: "1.1rem", fontWeight: "bold" }}>
-                    {totalDistance >= 1000 ? `${(totalDistance / 1000).toFixed(2)} km` : `${totalDistance} m`}
-                  </p>
-                  <small style={{ color: "#94a3b8" }}>Haz clics en el mapa para trazar la ruta</small>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => { setMeasurePoints([]); setTotalDistance(0); }}
-                  style={{ background: "rgba(255,255,255,0.1)", border: "none", color: "#fff", padding: "6px", borderRadius: "6px", cursor: "pointer" }}
-                  title="Borrar trazo"
-                >
-                  <Trash2 size={16} />
-                </button>
-              </div>
+              <span style={{ fontSize: "0.7rem", color: "#fda4af", textTransform: "uppercase", fontWeight: "bold" }}>Distancia de Traza</span>
+              <p style={{ margin: "2px 0", fontSize: "1rem", fontWeight: "bold" }}>
+                {totalDistance >= 1000 ? `${(totalDistance / 1000).toFixed(2)} km` : `${totalDistance} m`}
+              </p>
+              <small style={{ color: "#94a3b8" }}>Haz clics sobre la ruta para medir</small>
             </div>
           )}
 
           {activeTool === "BUFFER" && (
             <div style={{
               position: "absolute",
-              top: "16px",
-              left: "16px",
+              top: "60px",
+              right: "14px",
               zIndex: 1000,
               background: "rgba(15, 23, 42, 0.95)",
               color: "#ffffff",
-              padding: "12px 16px",
+              padding: "10px 14px",
               borderRadius: "8px",
               border: "1px solid #f59e0b",
-              boxShadow: "0 10px 25px rgba(0,0,0,0.5)",
-              minWidth: "240px"
+              minWidth: "220px"
             }}>
-              <span style={{ fontSize: "0.75rem", color: "#fcd34d", textTransform: "uppercase", fontWeight: "bold" }}>Área de Influencia</span>
-              <p style={{ margin: "4px 0", fontSize: "0.85rem" }}>
-                Activo: <strong>{selectedFeature?.properties?.nombre || "Toca un elemento"}</strong>
-              </p>
-              <div style={{ margin: "8px 0" }}>
-                <input
-                  type="range"
-                  min="20"
-                  max="1500"
-                  step="20"
-                  value={bufferMeters}
-                  onChange={(e) => setBufferMeters(Number(e.target.value))}
-                  style={{ width: "100%", cursor: "pointer" }}
-                />
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "#94a3b8" }}>
-                  <span>20m</span>
-                  <strong style={{ color: "#f59e0b" }}>{bufferMeters} m</strong>
-                  <span>1.5 km</span>
-                </div>
+              <span style={{ fontSize: "0.7rem", color: "#fcd34d", textTransform: "uppercase", fontWeight: "bold" }}>Radio de Buffer</span>
+              <input
+                type="range"
+                min="20"
+                max="1500"
+                step="20"
+                value={bufferMeters}
+                onChange={(e) => setBufferMeters(Number(e.target.value))}
+                style={{ width: "100%", margin: "6px 0", cursor: "pointer" }}
+              />
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "#f59e0b", fontWeight: "bold" }}>
+                <span>Radio: {bufferMeters} m</span>
+                <span>{bufferCount !== null ? `${bufferCount} vecinos` : ""}</span>
               </div>
-              {bufferCount !== null && (
-                <div style={{ background: "rgba(245,158,11,0.15)", padding: "6px 8px", borderRadius: "6px", fontSize: "0.8rem" }}>
-                  📊 <strong>{bufferCount} activos</strong> encontrados en el radio.
-                </div>
-              )}
             </div>
           )}
 
           {activeTool === "NEAREST" && nearestResult && (
             <div style={{
               position: "absolute",
-              top: "16px",
-              left: "16px",
+              top: "60px",
+              right: "14px",
               zIndex: 1000,
               background: "rgba(15, 23, 42, 0.95)",
               color: "#ffffff",
-              padding: "12px 16px",
+              padding: "10px 14px",
               borderRadius: "8px",
               border: "1px solid #ec4899",
-              boxShadow: "0 10px 25px rgba(0,0,0,0.5)"
             }}>
-              <span style={{ fontSize: "0.75rem", color: "#f472b6", textTransform: "uppercase", fontWeight: "bold" }}>Vecino Más Cercano</span>
-              <p style={{ margin: "4px 0", fontSize: "0.9rem", fontWeight: "bold" }}>{nearestResult.name}</p>
-              <p style={{ margin: 0, fontSize: "0.85rem", color: "#ec4899" }}>
-                Distancia en línea recta: <strong>{nearestResult.distance >= 1000 ? `${(nearestResult.distance / 1000).toFixed(2)} km` : `${nearestResult.distance} m`}</strong>
-              </p>
+              <span style={{ fontSize: "0.7rem", color: "#f472b6", textTransform: "uppercase", fontWeight: "bold" }}>Elemento Más Cercano</span>
+              <p style={{ margin: "2px 0", fontSize: "0.85rem", fontWeight: "bold" }}>{nearestResult.name}</p>
+              <small style={{ color: "#ec4899" }}>Distancia: {nearestResult.distance} m</small>
             </div>
           )}
 
-          <div className="map-topline" style={{ left: activeTool !== "NONE" ? "280px" : "16px", transition: "left 0.2s" }}>
-            <div><ShieldCheck aria-hidden="true" /><span>SIG en vivo</span></div>
-            <button type="button" onClick={fitAll}><LocateFixed aria-hidden="true" /> Ver todos</button>
+          <div className="map-topline">
+            <button type="button" onClick={fitAll}><LocateFixed size={15} /> Encuadre General</button>
           </div>
 
-          <div className="map-legend" aria-label="Leyenda del mapa">
-            {(Object.keys(GEOMETRY_LABELS) as GeometryClass[]).map((geometry) => <span key={geometry}><i style={{ backgroundColor: GEOMETRY_COLORS[geometry] }} />{GEOMETRY_LABELS[geometry]}</span>)}
-          </div>
-
-          {/* FICHA TÉCNICA PRECISA */}
+          {/* FICHA TÉCNICA DEL ELEMENTO (UBICADA ABAJO A LA DERECHA PARA NO SUPERPONERSE) */}
           {selectedFeature && (
-            <article className="detail-card">
+            <article className="detail-card" style={{
+              position: "absolute",
+              bottom: "20px",
+              right: "20px",
+              zIndex: 999,
+              maxWidth: "340px",
+              boxShadow: "0 10px 30px rgba(0,0,0,0.6)",
+              margin: 0
+            }}>
               <div className="detail-accent" style={{ background: GEOMETRY_COLORS[geometryClass(selectedFeature)] }} />
               <div className="detail-header">
                 <div>
-                  <span className="detail-type">{GEOMETRY_LABELS[geometryClass(selectedFeature)]} · {displayValue(selectedFeature.properties.tipo_activo ?? selectedFeature.properties.tipo)}</span>
+                  <span className="detail-type">{geometryClass(selectedFeature)} · {displayValue(selectedFeature.properties.tipo_activo ?? selectedFeature.properties.tipo)}</span>
                   <h2>{displayValue(selectedFeature.properties.nombre, "Activo")}</h2>
                 </div>
-                <button type="button" onClick={() => setSelectedId(null)} aria-label="Cerrar detalle"><X aria-hidden="true" /></button>
+                <button type="button" onClick={() => setSelectedId(null)} aria-label="Cerrar"><X size={16} /></button>
               </div>
 
               <div className="detail-grid">
-                <div><span>Código</span><strong>{displayValue(selectedFeature.properties.codigo, "Pendiente")}</strong></div>
+                <div><span>Código</span><strong>{displayValue(selectedFeature.properties.codigo)}</strong></div>
                 <div><span>Estado</span><strong>{displayValue(selectedFeature.properties.estado_validacion)}</strong></div>
                 <div><span>Ciclo de vida</span><strong>{displayValue(selectedFeature.properties.estado_ciclo_vida)}</strong></div>
                 <div><span>Lote / Origen</span><strong>{displayValue(selectedFeature.properties.lote_origen, "QGIS Directo")}</strong></div>
-                <div><span>Calidad del dato</span><strong>{displayValue(selectedFeature.properties.calidad_dato)}</strong></div>
-                <div><span>Precisión</span><strong>{selectedFeature.properties.precision_m !== undefined ? `${selectedFeature.properties.precision_m} m` : "Sin informar"}</strong></div>
+                <div><span>Precisión</span><strong>{displayValue(selectedFeature.properties.precision_m)} m</strong></div>
+                <div><span>Posicionamiento</span><strong>{displayValue(selectedFeature.properties.metodo_posicion)}</strong></div>
               </div>
-              {selectedFeature.properties.observaciones && <p className="detail-observation"><span>Observaciones</span>{selectedFeature.properties.observaciones}</p>}
+              {selectedFeature.properties.observaciones && <p className="detail-observation"><span>Obs:</span> {selectedFeature.properties.observaciones}</p>}
             </article>
           )}
 
-          <a className="osm-link" href="https://www.openstreetmap.org" target="_blank" rel="noreferrer">Mapa Base <ArrowUpRight aria-hidden="true" /></a>
+          <a className="osm-link" href="https://www.openstreetmap.org" target="_blank" rel="noreferrer">OpenStreetMap <ArrowUpRight size={14} /></a>
         </section>
       </section>
     </main>
