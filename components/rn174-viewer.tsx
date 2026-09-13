@@ -2,16 +2,12 @@
 
 import {
   CheckSquare,
-  ChevronDown,
-  ChevronRight,
   Crosshair,
   Filter,
   Layers,
   LocateFixed,
-  MapPin,
   RefreshCw,
   Search,
-  SlidersHorizontal,
   Square,
   Wrench,
   X,
@@ -591,6 +587,7 @@ export function Rn174Viewer() {
 
           {/* LISTA RÁPIDA DE ELEMENTOS FILTRADOS */}
           <div className="asset-list" style={{ flex: 1, overflowY: "auto", borderTop: "1px solid rgba(255,255,255,0.1)" }}>
+            {error && <div className="error-state"><p>{error}</p></div>}
             {filteredFeatures.map((f) => {
               const geom = getGeomClass(f);
               const isSel = f.id === selectedId;
