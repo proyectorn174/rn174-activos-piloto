@@ -3,11 +3,10 @@
 import {
   AlertTriangle,
   ArrowUpRight,
-  CheckSquare,
   CircleDot,
   Clock3,
   Database,
-  Layers,
+  Filter,
   Layers3,
   LocateFixed,
   MapPinned,
@@ -15,7 +14,6 @@ import {
   Route,
   Search,
   ShieldCheck,
-  Square,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -38,7 +36,8 @@ type AssetProperties = {
   precision_m?: number;
   metodo_posicion?: string;
   observaciones?: string;
-  lote_origen?: string;
+  actualizado_en?: string;
+  es_demo?: boolean;
 };
 
 type AssetFeature = {
@@ -54,13 +53,25 @@ type AssetCollection = {
   metadata?: {
     dataset?: string;
     ruta?: string;
+    es_demo?: boolean;
+    advertencia?: string;
+    progresiva?: string;
   };
 };
 
+type FilterValue = "TODOS" | GeometryClass;
+
+const FILTERS: { value: FilterValue; label: string }[] = [
+  { value: "TODOS", label: "Todos" },
+  { value: "PUNTO", label: "Puntos" },
+  { value: "LINEA", label: "Líneas" },
+  { value: "POLIGONO", label: "Superficies" },
+];
+
 const GEOMETRY_LABELS: Record<GeometryClass, string> = {
-  PUNTO: "Puntos",
-  LINEA: "Líneas",
-  POLIGONO: "Superficies",
+  PUNTO: "Punto",
+  LINEA: "Línea",
+  POLIGONO: "Superficie",
 };
 
 const GEOMETRY_COLORS: Record<GeometryClass, string> = {
@@ -76,7 +87,10 @@ const SUPABASE_PUBLISHABLE_KEY =
   "sb_publishable_QhSYofToTULcOQ5pynkCoQ_Ha6Om1w9";
 
 const normalize = (value?: string) =>
-  (value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  (value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
 
 const displayValue = (value: string | number | undefined, fallback = "Sin informar") =>
   value === undefined || value === null || value === "" ? fallback : String(value);
@@ -100,7 +114,7 @@ export function Rn174Viewer() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [enabledLayers, setEnabledLayers] = useState<Record<string, boolean>>({});
+  const [filter, setFilter] = useState<FilterValue>("TODOS");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loadedAt, setLoadedAt] = useState<Date | null>(null);
   const mapNodeRef = useRef<HTMLDivElement | null>(null);
@@ -112,6 +126,9 @@ export function Rn174Viewer() {
     setLoading(true);
     setError(null);
     try {
+      if (!SUPABASE_PUBLISHABLE_KEY) {
+        throw new Error("Falta configurar la clave pública del proyecto.");
+      }
       const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/rn174_demo_geojson`, {
         method: "POST",
         headers: {
@@ -125,21 +142,12 @@ export function Rn174Viewer() {
       const payload = (await response.json()) as AssetCollection & { error?: string };
       if (!response.ok) throw new Error(payload.error || "No se pudo consultar Supabase.");
       if (payload.type !== "FeatureCollection" || !Array.isArray(payload.features)) {
-        throw new Error("Formato GeoJSON inesperado.");
+        throw new Error("La respuesta publicada no tiene el formato GeoJSON esperado.");
       }
       setCollection(payload);
       setLoadedAt(new Date());
-
-      // Inicializar todas las capas descubiertas como ACTIVAS
-      const initialLayers: Record<string, boolean> = {};
-      payload.features.forEach((f) => {
-        const layerKey = f.properties.tipo || GEOMETRY_LABELS[geometryClass(f)];
-        initialLayers[layerKey] = true;
-      });
-      setEnabledLayers(initialLayers);
-
       setSelectedId((current) =>
-        current && payload.features.some((f) => f.id === current)
+        current && payload.features.some((feature) => feature.id === current)
           ? current
           : payload.features[0]?.id ?? null,
       );
@@ -151,54 +159,22 @@ export function Rn174Viewer() {
   }, []);
 
   useEffect(() => {
-    void loadAssets();
+    const initialLoad = window.setTimeout(() => void loadAssets(), 0);
+    return () => window.clearTimeout(initialLoad);
   }, [loadAssets]);
-
-  // Lista dinámica de capas basada en los datos reales de Supabase
-  const layersList = useMemo(() => {
-    const map = new Map<string, { name: string; geometry: GeometryClass; count: number }>();
-    (collection?.features ?? []).forEach((f) => {
-      const geom = geometryClass(f);
-      const name = f.properties.tipo || GEOMETRY_LABELS[geom];
-      const existing = map.get(name);
-      if (existing) {
-        existing.count += 1;
-      } else {
-        map.set(name, { name, geometry: geom, count: 1 });
-      }
-    });
-    return Array.from(map.values());
-  }, [collection]);
-
-  const toggleLayer = (layerName: string) => {
-    setEnabledLayers((prev) => ({
-      ...prev,
-      [layerName]: !prev[layerName],
-    }));
-  };
 
   const visibleFeatures = useMemo(() => {
     const terms = normalize(query).split(/\s+/).filter(Boolean);
     return (collection?.features ?? []).filter((feature) => {
-      const geom = geometryClass(feature);
-      const layerKey = feature.properties.tipo || GEOMETRY_LABELS[geom];
-      if (enabledLayers[layerKey] === false) return false;
-
+      const geometry = geometryClass(feature);
+      if (filter !== "TODOS" && geometry !== filter) return false;
       const properties = feature.properties;
       const haystack = normalize(
-        [
-          properties.nombre,
-          properties.codigo,
-          properties.tipo,
-          properties.tipo_codigo,
-          properties.familia,
-          properties.ruta,
-          properties.lote_origen,
-        ].join(" "),
+        [properties.nombre, properties.codigo, properties.tipo, properties.tipo_codigo, properties.familia, properties.ruta, properties.estado_validacion].join(" "),
       );
       return terms.every((term) => haystack.includes(term));
     });
-  }, [collection, enabledLayers, query]);
+  }, [collection, filter, query]);
 
   const selectedFeature = useMemo(
     () => collection?.features.find((feature) => feature.id === selectedId) ?? null,
@@ -223,6 +199,7 @@ export function Rn174Viewer() {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
       }).addTo(map);
       mapRef.current = map;
+      window.setTimeout(() => map.invalidateSize(), 0);
     }
     void createMap();
     return () => {
@@ -272,6 +249,10 @@ export function Rn174Viewer() {
       },
     ).addTo(map);
     layerRef.current = layer;
+    if (layer.getLayers().length > 0) {
+      const bounds = layer.getBounds();
+      if (bounds.isValid()) map.fitBounds(bounds.pad(0.16), { maxZoom: 17, animate: false });
+    }
   }, [collection, selectedId, visibleFeatures]);
 
   const focusFeature = useCallback((feature: AssetFeature) => {
@@ -292,91 +273,82 @@ export function Rn174Viewer() {
     if (bounds.isValid()) map.fitBounds(bounds.pad(0.16), { maxZoom: 17 });
   }, []);
 
+  const counts = useMemo(() => {
+    const base = { PUNTO: 0, LINEA: 0, POLIGONO: 0 };
+    for (const feature of collection?.features ?? []) base[geometryClass(feature)] += 1;
+    return base;
+  }, [collection]);
+
   return (
     <main className="app-shell">
       <header className="topbar">
         <div className="brand-lockup">
           <div className="route-shield" aria-hidden="true"><span>RN</span><strong>174</strong></div>
-          <div><p className="eyebrow">Inventario vial dinámico</p><h1>Visor de capas SIG</h1></div>
+          <div><p className="eyebrow">Inventario vial · piloto</p><h1>Visor de activos</h1></div>
         </div>
         <div className="topbar-status">
           <span className="live-dot" aria-hidden="true" />
-          <span>Sincronizado con Supabase</span>
-          <button className="icon-button" type="button" onClick={() => void loadAssets()} aria-label="Actualizar datos">
+          <span>Consulta en vivo desde Supabase</span>
+          <button className="icon-button" type="button" onClick={() => void loadAssets()} aria-label="Actualizar datos" title="Actualizar datos">
             <RefreshCw className={loading ? "spin" : ""} aria-hidden="true" />
           </button>
         </div>
       </header>
 
       <section className="workspace">
-        <aside className="sidebar" aria-label="Control de Capas">
-          <div className="sidebar-heading">
-            <div><p className="section-kicker">Capas del Proyecto</p><h2>Control de Capas (QGIS)</h2></div>
-            <span className="total-badge">{visibleFeatures.length} visibles</span>
+        <aside className="sidebar" aria-label="Inventario publicado">
+          <div className="demo-banner">
+            <AlertTriangle aria-hidden="true" />
+            <div><strong>Datos ficticios de demostración</strong><span>No utilizar para decisiones operativas.</span></div>
           </div>
 
-          {/* SELECTOR / ÁRBOL DE CAPAS TIPO QGIS */}
-          <div style={{ padding: "0.5rem 1rem", background: "rgba(255,255,255,0.04)", borderRadius: "8px", margin: "0.5rem 1rem" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "8px", fontWeight: "bold", fontSize: "0.85rem" }}>
-              <Layers size={16} /> <span>Capas visibles en el mapa</span>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-              {layersList.map((layerItem) => {
-                const isActive = enabledLayers[layerItem.name] !== false;
-                return (
-                  <button
-                    key={layerItem.name}
-                    type="button"
-                    onClick={() => toggleLayer(layerItem.name)}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      background: isActive ? "rgba(255,255,255,0.08)" : "transparent",
-                      border: "1px solid rgba(255,255,255,0.1)",
-                      borderRadius: "6px",
-                      padding: "6px 10px",
-                      cursor: "pointer",
-                      color: "inherit",
-                      fontSize: "0.85rem",
-                      textAlign: "left"
-                    }}
-                  >
-                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                      {isActive ? <CheckSquare size={16} color="#10b981" /> : <Square size={16} color="#6b7280" />}
-                      <span style={{ color: GEOMETRY_COLORS[layerItem.geometry], fontWeight: 600 }}>●</span>
-                      <span>{layerItem.name}</span>
-                    </div>
-                    <span style={{ fontSize: "0.75rem", background: "rgba(255,255,255,0.15)", padding: "2px 6px", borderRadius: "10px" }}>
-                      {layerItem.count}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
+          <div className="sidebar-heading">
+            <div><p className="section-kicker">Ruta {collection?.metadata?.ruta ?? "RN174"}</p><h2>Activos publicados</h2></div>
+            <span className="total-badge">{collection?.features.length ?? "—"}</span>
+          </div>
+
+          <div className="metrics" aria-label="Resumen por geometría">
+            <div><CircleDot aria-hidden="true" /><strong>{counts.PUNTO}</strong><span>Punto</span></div>
+            <div><Route aria-hidden="true" /><strong>{counts.LINEA}</strong><span>Línea</span></div>
+            <div><Layers3 aria-hidden="true" /><strong>{counts.POLIGONO}</strong><span>Superficie</span></div>
           </div>
 
           <label className="search-box">
             <Search aria-hidden="true" />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar elemento por nombre o código..." />
-            {query && <button type="button" onClick={() => setQuery("")}><X aria-hidden="true" /></button>}
+            <span className="sr-only">Buscar activo</span>
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar por nombre, tipo o código" />
+            {query && <button type="button" onClick={() => setQuery("")} aria-label="Borrar búsqueda"><X aria-hidden="true" /></button>}
           </label>
 
+          <div className="filter-row" aria-label="Filtrar por geometría">
+            <Filter aria-hidden="true" />
+            {FILTERS.map((item) => (
+              <button type="button" key={item.value} className={filter === item.value ? "active" : ""} onClick={() => setFilter(item.value)}>{item.label}</button>
+            ))}
+          </div>
+
           <div className="asset-list" aria-live="polite">
-            {loading && !collection && <div className="loading-state"><p>Consultando Supabase…</p></div>}
-            {error && <div className="error-state"><p>{error}</p></div>}
+            {loading && !collection && <div className="loading-state"><span className="loading-ring" /><p>Consultando Supabase…</p></div>}
+            {error && (
+              <div className="error-state">
+                <Database aria-hidden="true" /><h3>No pudimos cargar los activos</h3><p>{error}</p>
+                <button type="button" onClick={() => void loadAssets()}><RefreshCw aria-hidden="true" /> Reintentar</button>
+              </div>
+            )}
+            {!loading && !error && visibleFeatures.length === 0 && <div className="empty-state"><Search aria-hidden="true" /><p>No hay activos que coincidan con el filtro.</p></div>}
             {visibleFeatures.map((feature) => {
               const properties = feature.properties;
               const geometry = geometryClass(feature);
               const selected = feature.id === selectedId;
               return (
-                <button type="button" key={feature.id} className={`asset-card ${selected ? "selected" : ""}`} onClick={() => focusFeature(feature)}>
+                <button type="button" key={feature.id ?? `${properties.nombre}-${geometry}`} className={`asset-card ${selected ? "selected" : ""}`} onClick={() => focusFeature(feature)}>
                   <span className="asset-mark" style={{ "--asset-color": GEOMETRY_COLORS[geometry] } as React.CSSProperties}><AssetMark geometry={geometry} /></span>
                   <span className="asset-copy">
-                    <span className="asset-title">{displayValue(properties.nombre, "Activo")}</span>
+                    <span className="asset-title">{displayValue(properties.nombre, "Activo sin nombre")}</span>
                     <span className="asset-meta">{displayValue(properties.tipo)} · {GEOMETRY_LABELS[geometry]}</span>
-                    <span className="asset-route"><MapPinned aria-hidden="true" /> {displayValue(properties.ruta, "RN174")}</span>
+                    <span className="asset-route"><MapPinned aria-hidden="true" /> {displayValue(properties.ruta, "RN174")} · Progresiva pendiente</span>
                   </span>
+                  <span className="state-pill">{displayValue(properties.estado_validacion, "Sin estado")}</span>
                 </button>
               );
             })}
@@ -384,32 +356,44 @@ export function Rn174Viewer() {
 
           <div className="sync-note">
             <Clock3 aria-hidden="true" />
-            <span>{loadedAt ? `Actualizado ${loadedAt.toLocaleTimeString()}` : "Esperando datos"}</span>
+            <span>{loadedAt ? `Actualizado ${loadedAt.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })}` : "Esperando datos"}</span>
+            <span className="sync-source">PILOTO_WEB_001</span>
           </div>
         </aside>
 
-        <section className="map-panel">
+        <section className="map-panel" aria-label="Mapa de activos RN 174">
           <div ref={mapNodeRef} className="map-canvas" />
           <div className="map-topline">
-            <div><ShieldCheck aria-hidden="true" /><span>Visualización Dinámica SIG</span></div>
-            <button type="button" onClick={fitAll}><LocateFixed aria-hidden="true" /> Encuadre General</button>
+            <div><ShieldCheck aria-hidden="true" /><span>Solo consulta</span></div>
+            <button type="button" onClick={fitAll}><LocateFixed aria-hidden="true" /> Ver todos</button>
+          </div>
+          <div className="map-legend" aria-label="Leyenda del mapa">
+            {(Object.keys(GEOMETRY_LABELS) as GeometryClass[]).map((geometry) => <span key={geometry}><i style={{ backgroundColor: GEOMETRY_COLORS[geometry] }} />{GEOMETRY_LABELS[geometry]}</span>)}
           </div>
 
           {selectedFeature && (
             <article className="detail-card">
+              <div className="detail-accent" style={{ background: GEOMETRY_COLORS[geometryClass(selectedFeature)] }} />
               <div className="detail-header">
-                <div><h2>{displayValue(selectedFeature.properties.nombre)}</h2><small>{selectedFeature.properties.tipo}</small></div>
-                <button type="button" onClick={() => setSelectedId(null)}><X aria-hidden="true" /></button>
+                <div><span className="detail-type">{GEOMETRY_LABELS[geometryClass(selectedFeature)]} · {displayValue(selectedFeature.properties.tipo_codigo)}</span><h2>{displayValue(selectedFeature.properties.nombre, "Activo sin nombre")}</h2></div>
+                <button type="button" onClick={() => setSelectedId(null)} aria-label="Cerrar detalle"><X aria-hidden="true" /></button>
               </div>
               <div className="detail-grid">
-                <div><span>Código</span><strong>{displayValue(selectedFeature.properties.codigo)}</strong></div>
+                <div><span>Código</span><strong>{displayValue(selectedFeature.properties.codigo, "Pendiente")}</strong></div>
                 <div><span>Estado</span><strong>{displayValue(selectedFeature.properties.estado_validacion)}</strong></div>
-                <div><span>Lote / Origen</span><strong>{displayValue(selectedFeature.properties.lote_origen, "Directo QGIS")}</strong></div>
+                <div><span>Ciclo de vida</span><strong>{displayValue(selectedFeature.properties.estado_ciclo_vida)}</strong></div>
+                <div><span>Calidad del dato</span><strong>{displayValue(selectedFeature.properties.calidad_dato)}</strong></div>
+                <div><span>Precisión</span><strong>{selectedFeature.properties.precision_m !== undefined ? `${selectedFeature.properties.precision_m} m` : "Sin informar"}</strong></div>
+                <div><span>Posicionamiento</span><strong>{displayValue(selectedFeature.properties.metodo_posicion)}</strong></div>
               </div>
+              <div className="chainage-warning">
+                <MapPinned aria-hidden="true" /><div><span>Progresiva</span><strong>Pendiente de cálculo</strong><small>Requiere un eje RN 174 calibrado y versionado.</small></div>
+              </div>
+              {selectedFeature.properties.observaciones && <p className="detail-observation"><span>Observaciones</span>{selectedFeature.properties.observaciones}</p>}
             </article>
           )}
 
-          <a className="osm-link" href="https://www.openstreetmap.org" target="_blank" rel="noreferrer">OpenStreetMap <ArrowUpRight aria-hidden="true" /></a>
+          <a className="osm-link" href="https://www.openstreetmap.org" target="_blank" rel="noreferrer">Abrir mapa base <ArrowUpRight aria-hidden="true" /></a>
         </section>
       </section>
     </main>
