@@ -163,8 +163,9 @@ export function BimModelSwitcher() {
 
   useEffect(() => {
     if (active === "BRIDGE") return;
-    const node = viewportRef.current;
-    if (!node) return;
+    const currentNode = viewportRef.current;
+    if (!currentNode) return;
+    const node: HTMLDivElement = currentNode;
 
     let disposed = false;
     let animationFrame = 0;
@@ -175,7 +176,7 @@ export function BimModelSwitcher() {
     async function build() {
       const THREE = await import("three");
       const { OrbitControls } = await import("three/examples/jsm/controls/OrbitControls.js");
-      if (disposed || !viewportRef.current) return;
+      if (disposed) return;
 
       node.replaceChildren();
       const scene = new THREE.Scene();
@@ -360,7 +361,8 @@ export function BimModelSwitcher() {
   }, [active, autoRotate, resetNonce, view]);
 
   const treePortal = useMemo(() => {
-    if (!treeHost) return null;
+    const host = treeHost;
+    if (!host) return null;
     return createPortal(
       <>
         <button className={`tree-node level-2 bim-tree-model ${active === "TOLL" ? "active" : ""}`} type="button" onClick={() => setActive("TOLL")}>
@@ -370,12 +372,13 @@ export function BimModelSwitcher() {
           <Box size={15} /><span>{MODELS.SIGNS.filename}</span><em>IFC4.3</em>
         </button>
       </>,
-      treeHost,
+      host,
     );
   }, [active, treeHost]);
 
   const stagePortal = useMemo(() => {
-    if (!stageHost || active === "BRIDGE") return null;
+    const host = stageHost;
+    if (!host || active === "BRIDGE") return null;
     return createPortal(
       <div className="bim-switch-overlay">
         <style>{`
@@ -399,7 +402,7 @@ export function BimModelSwitcher() {
         <div className="bim-switch-provenance"><strong>{model.provenance}</strong><span>{model.detail}</span><span className="bim-switch-warning">Geometría 3D de visualización preliminar; falta conciliación completa con DWG conforme a obra. No usar para replanteo.</span></div>
         <div className="bim-switch-toolbar">{(["3D", "PLANTA", "ALZADO"] as BimView[]).map((item) => <button key={item} type="button" className={view === item ? "active" : ""} onClick={() => setView(item)}>{item}</button>)}</div>
       </div>,
-      stageHost,
+      host,
     );
   }, [active, autoRotate, model.code, model.detail, model.provenance, model.url, stageHost, view]);
 
