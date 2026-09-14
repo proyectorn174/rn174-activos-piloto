@@ -1,0 +1,32 @@
+{
+  "schema": "IFC4X3_ADD2",
+  "status": "PRELIMINAR_NO_VALIDADO",
+  "models": [
+    {
+      "id": "toll_station",
+      "name": "Estacion de Peaje Isla La Deseada",
+      "ifc": "RN174_ESTACION_PEAJE_IFC4X3_PRELIMINAR.ifc",
+      "asset_codes": ["RN174-PEAJE-01", "RN174-PEAJE-02"],
+      "asset_ids": ["1a03a4ac-6b06-5389-8934-7c095fe14932", "d5b16fd4-5f4f-599a-8b85-a7ebf74eb945"],
+      "pk_range": [4908.51, 5542.67]
+    },
+    {
+      "id": "sign_sample",
+      "name": "Senales verticales Area de Peaje",
+      "ifc": "RN174_SENALES_VERTICAL_PEAJE_IFC4X3_PRELIMINAR.ifc",
+      "asset_codes": ["RN174-SV-0084", "RN174-SV-0086", "RN174-SV-0092", "RN174-SV-0094", "RN174-SV-0095"],
+      "asset_ids": ["e842068e-ade5-56cf-bc59-a6fae7ff925f", "bc01aa48-4f8e-53eb-acb0-4a9357025a01", "be74b158-8f9d-58c4-b2b6-dd9ad0d93496", "99c7da56-25ae-5479-adde-19a39dcf7d5d", "83bc9698-d360-5bf4-8d07-53a153b23305"]
+    }
+  ],
+  "signs": [
+    {"asset_id":"e842068e-ade5-56cf-bc59-a6fae7ff925f","code":"RN174-SV-0084","pk":4925.0,"lado":"DER","tipo":"I (T35)","desc":"Cuadro tarifario","w":2.5,"h":2.5,"posts":3,"shape":"RECTANGULAR","lon":-60.65448098224228,"lat":-32.8660167966139,"plano":"L-C-DT-306","estado":"OK"},
+    {"asset_id":"bc01aa48-4f8e-53eb-acb0-4a9357025a01","code":"RN174-SV-0086","pk":4980.0,"lado":"DER","tipo":"I (T37)","desc":"SR. USUARIO. LIBRO DE QUEJAS A SU DISPOSICION EN ESTACION DE PEAJE","w":2.0,"h":1.2,"posts":2,"shape":"RECTANGULAR","lon":-60.653897984042764,"lat":-32.865939463425256,"plano":"L-C-DT-306","estado":"OK"},
+    {"asset_id":"be74b158-8f9d-58c4-b2b6-dd9ad0d93496","code":"RN174-SV-0092","pk":5100.0,"lado":"IZQ","tipo":"R.22","desc":"Paso obligatorio (derecha)","w":0.9,"h":0.9,"posts":1,"shape":"CIRCULAR","lon":-60.65265049626301,"lat":-32.86563757081201,"plano":"L-C-DT-306","estado":"OK"},
+    {"asset_id":"99c7da56-25ae-5479-adde-19a39dcf7d5d","code":"RN174-SV-0094","pk":5150.0,"lado":"DER","tipo":"I","desc":"ATENCION: DESVIO DE CARRETONES","w":0.6,"h":1.2,"posts":2,"shape":"RECTANGULAR","lon":-60.65209521524422,"lat":-32.865700330852114,"plano":"L-C-DT-314","estado":"OK"},
+    {"asset_id":"83bc9698-d360-5bf4-8d07-53a153b23305","code":"RN174-SV-0095","pk":5150.0,"lado":"IZQ","tipo":"I (T38)","desc":"TRANSITO PESADO DESVIO OBLIGATORIO BALANZA","w":1.8,"h":1.25,"posts":1,"shape":"RECTANGULAR_PESCANTE","lon":-60.652120239739354,"lat":-32.86556723367156,"plano":"L-C-DT-306","estado":"OK"}
+  ],
+  "warnings": [
+    "Geometria de peaje transversal/arquitectonica esquematica pendiente conciliacion DWG.",
+    "Soportes de senales modelados genericamente; dimensiones de placas y progresivas proceden de inventario."
+  ]
+}
