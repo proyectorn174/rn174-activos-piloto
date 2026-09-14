@@ -1,0 +1,27 @@
+{
+  "schema": "RN174_BIM_SEMANTIC_REGISTRY_V1",
+  "models": [
+    {
+      "key": "SAN_MARTIN",
+      "code": "RN174-EST-04493",
+      "label": "Puente Calle San Martín",
+      "file": "RN174_PUENTE_CALLE_SAN_MARTIN_IFC4X3_PRELIMINAR.ifc",
+      "ifc_schema": "IFC4X3_ADD2",
+      "pk_start_m": 59139.37,
+      "pk_end_m": 59162.57,
+      "source": "G-G-ME-101 Rev16 + Unidad V (7 DWG)",
+      "status": "PRELIMINAR_NO_VALIDADO"
+    },
+    {
+      "key": "T13",
+      "code": "RN174-T13-MUESTRA-4632-4800",
+      "label": "T13 Pavimento + Taludes",
+      "file": "RN174_T13_PAVIMENTO_TALUD_IFC4X3_PRELIMINAR.ifc",
+      "ifc_schema": "IFC4X3_ADD2",
+      "pk_start_m": 4632.60,
+      "pk_end_m": 4800.00,
+      "source": "G-G-ME-101 Rev16 + Unidad L",
+      "status": "PRELIMINAR_NO_VALIDADO"
+    }
+  ]
+}
