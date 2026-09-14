@@ -51,6 +51,14 @@ type AssetProperties = {
   actualizado_en?: string;
   es_demo?: boolean;
   lote_origen?: string;
+  progresiva_m?: number;
+  progresiva?: string;
+  progresiva_inicio_m?: number;
+  progresiva_fin_m?: number;
+  desplazamiento_m?: number;
+  lado?: string;
+  atributos?: Record<string, unknown>;
+  es_preliminar?: boolean;
 };
 
 type AssetFeature = {
@@ -67,6 +75,7 @@ type AssetCollection = {
     dataset?: string;
     ruta?: string;
     es_demo?: boolean;
+    politica?: string;
   };
 };
 
@@ -192,7 +201,7 @@ export function Rn174Viewer() {
   const loadAssets = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/rn174_demo_geojson`, {
+      const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/rn174_activos_v32_geojson`, {
         method: "POST",
         headers: {
           apikey: SUPABASE_PUBLISHABLE_KEY,
@@ -242,7 +251,7 @@ export function Rn174Viewer() {
       if (filterType !== "TODOS" && type !== filterType) return false;
 
       const haystack = normalize(
-        [properties.nombre, properties.codigo, type, properties.tipo_codigo, properties.familia, properties.ruta, properties.estado_validacion, properties.lote_origen].join(" "),
+        [properties.nombre, properties.codigo, type, properties.tipo_codigo, properties.familia, properties.ruta, properties.estado_validacion, properties.lote_origen, properties.progresiva, properties.progresiva_m, properties.progresiva_inicio_m, properties.progresiva_fin_m, properties.desplazamiento_m, properties.lado].join(" "),
       );
       return terms.every((term) => haystack.includes(term));
     });
@@ -512,13 +521,18 @@ export function Rn174Viewer() {
   // EXPORTACIÓN A EXCEL / CSV
   const exportToCSV = () => {
     if (!visibleFeatures.length) return;
-    const headers = ["ID", "Nombre", "Tipo", "Geometría", "Ruta", "Estado", "Ciclo de Vida", "Lote", "Observaciones"];
+    const headers = ["ID", "Nombre", "Tipo", "Geometría", "Ruta", "Progresiva", "Prog. inicio (m)", "Prog. fin (m)", "Desplazamiento (m)", "Lado", "Estado", "Ciclo de Vida", "Lote", "Observaciones"];
     const rows = visibleFeatures.map((f) => [
       f.id,
       `"${f.properties.nombre || ""}"`,
       `"${f.properties.tipo_activo || f.properties.tipo || ""}"`,
       geometryClass(f),
       f.properties.ruta || "RN174",
+      f.properties.progresiva || f.properties.progresiva_m || "",
+      f.properties.progresiva_inicio_m ?? f.properties.progresiva_m ?? "",
+      f.properties.progresiva_fin_m ?? "",
+      f.properties.desplazamiento_m ?? "",
+      f.properties.lado || "",
       f.properties.estado_validacion || "",
       f.properties.estado_ciclo_vida || "",
       `"${f.properties.lote_origen || ""}"`,
@@ -1033,6 +1047,11 @@ export function Rn174Viewer() {
                 <div><span>Código</span><strong>{displayValue(selectedFeature.properties.codigo)}</strong></div>
                 <div><span>Estado</span><strong>{displayValue(selectedFeature.properties.estado_validacion)}</strong></div>
                 <div><span>Ciclo de vida</span><strong>{displayValue(selectedFeature.properties.estado_ciclo_vida)}</strong></div>
+                <div><span>Progresiva</span><strong>{displayValue(selectedFeature.properties.progresiva ?? selectedFeature.properties.progresiva_m)}</strong></div>
+                <div><span>Prog. inicio</span><strong>{displayValue(selectedFeature.properties.progresiva_inicio_m ?? selectedFeature.properties.progresiva_m)} m</strong></div>
+                <div><span>Prog. fin</span><strong>{displayValue(selectedFeature.properties.progresiva_fin_m)} m</strong></div>
+                <div><span>Desplazamiento</span><strong>{displayValue(selectedFeature.properties.desplazamiento_m)} m</strong></div>
+                <div><span>Lado</span><strong>{displayValue(selectedFeature.properties.lado)}</strong></div>
                 <div><span>Lote / Origen</span><strong>{displayValue(selectedFeature.properties.lote_origen, "QGIS Directo")}</strong></div>
                 <div><span>Precisión</span><strong>{displayValue(selectedFeature.properties.precision_m)} m</strong></div>
                 <div><span>Posicionamiento</span><strong>{displayValue(selectedFeature.properties.metodo_posicion)}</strong></div>
