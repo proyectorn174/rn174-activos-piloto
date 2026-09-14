@@ -1,9 +1,11 @@
+import { BimModelSwitcher } from "@/components/bim-model-switcher";
 import { Rn174Viewer } from "@/components/rn174-viewer";
 
 export default function Home() {
   return (
     <>
       <Rn174Viewer />
+      <BimModelSwitcher />
       <div
         role="status"
         style={{
