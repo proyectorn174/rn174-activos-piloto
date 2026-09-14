@@ -1,6 +1,6 @@
 "use client";
 
-import { Box, Crosshair, Download, RotateCcw } from "lucide-react";
+import { Box, Crosshair, Download, Eye, RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -10,6 +10,7 @@ type BimView = "3D" | "PLANTA" | "ALZADO";
 type ModelDef = {
   key: ModelKey;
   label: string;
+  shortLabel: string;
   subtitle: string;
   code: string;
   filename: string;
@@ -23,17 +24,19 @@ const MODELS: Record<ModelKey, ModelDef> = {
   BRIDGE: {
     key: "BRIDGE",
     label: "Puente Principal",
+    shortLabel: "Puente",
     subtitle: "Puente Principal · IFC4.3",
     code: "RN174-P-PUENTE-PRINCIPAL",
     filename: "RN174_PUENTE_PRINCIPAL_IFC4X3_PRELIMINAR.ifc",
     url: "./models/RN174_PUENTE_PRINCIPAL_IFC4X3_PRELIMINAR.ifc",
     provenance: "Modelo derivado de documentación conforme a obra",
     detail: "PK 1+647.60 → 2+255.60 · L=608 m · B=22.80 m · luz principal 350 m",
-    assetIds: [],
+    assetIds: ["6375790a-7fe6-5b68-b53c-4fc806330b05"],
   },
   TOLL: {
     key: "TOLL",
     label: "Estación de Peaje",
+    shortLabel: "Peaje",
     subtitle: "Estación de Peaje · IFC4.3",
     code: "RN174-PEAJE-01",
     filename: "RN174_ESTACION_PEAJE_IFC4X3_PRELIMINAR.ifc",
@@ -48,6 +51,7 @@ const MODELS: Record<ModelKey, ModelDef> = {
   SIGNS: {
     key: "SIGNS",
     label: "Señales verticales · Peaje",
+    shortLabel: "Señales",
     subtitle: "Señalización Vertical · IFC4.3",
     code: "RN174-SV-MUESTRA-PEAJE",
     filename: "RN174_SENALES_VERTICAL_PEAJE_IFC4X3_PRELIMINAR.ifc",
@@ -64,6 +68,8 @@ const MODELS: Record<ModelKey, ModelDef> = {
   },
 };
 
+const MODEL_ORDER: ModelKey[] = ["BRIDGE", "TOLL", "SIGNS"];
+
 const SIGN_DATA = [
   { code: "RN174-SV-0084", pk: 4925, side: 1, w: 2.5, h: 2.5, posts: 3, circular: false },
   { code: "RN174-SV-0086", pk: 4980, side: 1, w: 2.0, h: 1.2, posts: 2, circular: false },
@@ -73,9 +79,18 @@ const SIGN_DATA = [
 ];
 
 function modelFromAssetId(assetId: string): ModelKey | null {
-  if (MODELS.TOLL.assetIds.includes(assetId)) return "TOLL";
-  if (MODELS.SIGNS.assetIds.includes(assetId)) return "SIGNS";
+  for (const key of MODEL_ORDER) {
+    if (MODELS[key].assetIds.includes(assetId)) return key;
+  }
   return null;
+}
+
+function setReactInputValue(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+  if (setter) setter.call(input, value);
+  else input.value = value;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
 export function BimModelSwitcher() {
@@ -89,21 +104,23 @@ export function BimModelSwitcher() {
 
   const model = MODELS[active];
 
+  const chooseModel = (key: ModelKey) => {
+    setActive(key);
+    setView("3D");
+    setAutoRotate(false);
+    setResetNonce((value) => value + 1);
+  };
+
   useEffect(() => {
     let cancelled = false;
-    let bridgeLink: HTMLAnchorElement | null = null;
-    let treeInsert: HTMLDivElement | null = null;
-    let observer: MutationObserver | null = null;
+    let interval = 0;
 
-    const mount = () => {
+    const ensureHosts = () => {
       if (cancelled) return;
       const tree = document.querySelector<HTMLElement>(".tree-card");
       const stage = document.querySelector<HTMLElement>(".bim-stage");
-      bridgeLink = document.querySelector<HTMLAnchorElement>('a[href*="RN174_PUENTE_PRINCIPAL_IFC4X3_PRELIMINAR.ifc"]');
-      if (!tree || !stage || !bridgeLink) {
-        window.setTimeout(mount, 150);
-        return;
-      }
+      const bridgeLink = document.querySelector<HTMLAnchorElement>('a[href*="RN174_PUENTE_PRINCIPAL_IFC4X3_PRELIMINAR.ifc"]');
+      if (!tree || !stage || !bridgeLink) return;
 
       const folder = Array.from(tree.querySelectorAll<HTMLElement>(".tree-node.level-1")).find((node) =>
         node.textContent?.includes("01_MODELOS_BIM"),
@@ -111,42 +128,25 @@ export function BimModelSwitcher() {
       const count = folder?.querySelector("em");
       if (count) count.textContent = "3 modelos";
 
-      treeInsert = document.createElement("div");
-      treeInsert.className = "bim-model-switcher-tree-host";
-      bridgeLink.insertAdjacentElement("afterend", treeInsert);
-      setTreeHost(treeInsert);
-      setStageHost(stage);
-
-      const onBridgeClick = (event: MouseEvent) => {
-        event.preventDefault();
-        setActive("BRIDGE");
-      };
-      bridgeLink.addEventListener("click", onBridgeClick);
-
-      const inspector = document.querySelector<HTMLElement>(".doc-inspector");
-      if (inspector) {
-        const syncFromInspector = () => {
-          const firstCell = inspector.querySelector<HTMLTableCellElement>("tbody tr:first-child td");
-          const assetId = firstCell?.textContent?.trim() ?? "";
-          const target = modelFromAssetId(assetId);
-          if (target) setActive(target);
-        };
-        observer = new MutationObserver(syncFromInspector);
-        observer.observe(inspector, { subtree: true, childList: true, characterData: true });
-        syncFromInspector();
+      bridgeLink.style.display = "none";
+      let host = tree.querySelector<HTMLDivElement>(".bim-model-switcher-tree-host");
+      if (!host) {
+        host = document.createElement("div");
+        host.className = "bim-model-switcher-tree-host";
+        bridgeLink.insertAdjacentElement("afterend", host);
       }
-
-      return () => {
-        bridgeLink?.removeEventListener("click", onBridgeClick);
-      };
+      setTreeHost((current) => (current === host ? current : host));
+      setStageHost((current) => (current === stage ? current : stage));
     };
 
-    const cleanupBridge = mount();
+    ensureHosts();
+    interval = window.setInterval(ensureHosts, 500);
     return () => {
       cancelled = true;
-      observer?.disconnect();
-      cleanupBridge?.();
-      treeInsert?.remove();
+      window.clearInterval(interval);
+      document.querySelectorAll<HTMLElement>(".bim-model-switcher-tree-host").forEach((node) => node.remove());
+      const bridgeLink = document.querySelector<HTMLAnchorElement>('a[href*="RN174_PUENTE_PRINCIPAL_IFC4X3_PRELIMINAR.ifc"]');
+      if (bridgeLink) bridgeLink.style.display = "";
     };
   }, []);
 
@@ -156,10 +156,49 @@ export function BimModelSwitcher() {
     const small = panel?.querySelector<HTMLElement>(".panel-titlebar small");
     if (subtitle) subtitle.textContent = model.subtitle;
     if (small) small.textContent = active === "BRIDGE" ? "modelo maestro" : "modelo seleccionado";
-
-    const bridgeLink = document.querySelector<HTMLAnchorElement>('a[href*="RN174_PUENTE_PRINCIPAL_IFC4X3_PRELIMINAR.ifc"]');
-    bridgeLink?.classList.toggle("active", active === "BRIDGE");
   }, [active, model.subtitle]);
+
+  useEffect(() => {
+    const inspector = document.querySelector<HTMLElement>(".doc-inspector");
+    if (!inspector) return;
+    const syncFromInspector = () => {
+      const firstCell = inspector.querySelector<HTMLTableCellElement>("tbody tr:first-child td");
+      const assetId = firstCell?.textContent?.trim() ?? "";
+      const target = modelFromAssetId(assetId);
+      if (target) setActive(target);
+    };
+    const observer = new MutationObserver(syncFromInspector);
+    observer.observe(inspector, { subtree: true, childList: true, characterData: true });
+    syncFromInspector();
+    return () => observer.disconnect();
+  }, []);
+
+  const showInGis = () => {
+    if (active === "BRIDGE") {
+      const nativeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".bim-actions button"));
+      const nativeGisButton = nativeButtons.find((button) => button.textContent?.includes("Ver en GIS"));
+      nativeGisButton?.click();
+      return;
+    }
+
+    const assetId = model.assetIds[0];
+    const input = document.querySelector<HTMLInputElement>(".global-search-wrap input");
+    if (!assetId || !input) return;
+    input.focus();
+    setReactInputValue(input, assetId);
+
+    const trySelect = (attempt = 0) => {
+      const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>(".global-search-results button"));
+      const exact = buttons.find((button) => button.textContent?.includes(assetId));
+      const target = exact ?? buttons[0];
+      if (target) {
+        target.click();
+        return;
+      }
+      if (attempt < 5) window.setTimeout(() => trySelect(attempt + 1), 120);
+    };
+    window.setTimeout(() => trySelect(), 80);
+  };
 
   useEffect(() => {
     if (active === "BRIDGE") return;
@@ -266,7 +305,6 @@ export function BimModelSwitcher() {
         const grid = new THREE.GridHelper(190, 38, 0x9aa9b9, 0xc7d1db);
         grid.position.y = -0.45;
         scene.add(grid);
-
         controls.target.set(8, 2.5, -4);
         if (view === "PLANTA") camera.position.set(8, 145, -4);
         else if (view === "ALZADO") camera.position.set(8, 20, 125);
@@ -294,7 +332,11 @@ export function BimModelSwitcher() {
             arm.position.set(x, 3.9, z - sign.side * 1.65);
             group.add(arm);
           } else {
-            const spread = sign.posts === 1 ? [0] : Array.from({ length: sign.posts }, (_, i) => (i - (sign.posts - 1) / 2) * Math.min(1.2, sign.w / Math.max(1, sign.posts - 1)));
+            const spread = sign.posts === 1
+              ? [0]
+              : Array.from({ length: sign.posts }, (_, index) =>
+                  (index - (sign.posts - 1) / 2) * Math.min(1.2, sign.w / Math.max(1, sign.posts - 1)),
+                );
             for (const dz of spread) {
               const post = new THREE.Mesh(new THREE.BoxGeometry(0.1, 3.0, 0.1), posts);
               post.position.set(x, 1.5, z + dz);
@@ -319,7 +361,6 @@ export function BimModelSwitcher() {
         const grid = new THREE.GridHelper(300, 60, 0x9aa9b9, 0xc7d1db);
         grid.position.y = -0.4;
         scene.add(grid);
-
         controls.target.set(0, 2.4, 0);
         if (view === "PLANTA") camera.position.set(0, 125, 0.1);
         else if (view === "ALZADO") camera.position.set(0, 13, 110);
@@ -357,54 +398,98 @@ export function BimModelSwitcher() {
       resizeObserver?.disconnect();
       controlsToDispose?.dispose();
       rendererToDispose?.dispose();
+      node.replaceChildren();
     };
   }, [active, autoRotate, resetNonce, view]);
 
   const treePortal = useMemo(() => {
-    const host = treeHost;
-    if (!host) return null;
+    if (!treeHost) return null;
     return createPortal(
-      <>
-        <button className={`tree-node level-2 bim-tree-model ${active === "TOLL" ? "active" : ""}`} type="button" onClick={() => setActive("TOLL")}>
-          <Box size={15} /><span>{MODELS.TOLL.filename}</span><em>IFC4.3</em>
-        </button>
-        <button className={`tree-node level-2 bim-tree-model ${active === "SIGNS" ? "active" : ""}`} type="button" onClick={() => setActive("SIGNS")}>
-          <Box size={15} /><span>{MODELS.SIGNS.filename}</span><em>IFC4.3</em>
-        </button>
-      </>,
-      host,
+      <div className="bim-tree-model-list">
+        {MODEL_ORDER.map((key) => {
+          const item = MODELS[key];
+          return (
+            <button
+              key={key}
+              className={`tree-node level-2 bim-tree-model ${active === key ? "active" : ""}`}
+              type="button"
+              onClick={() => chooseModel(key)}
+              title={`Abrir ${item.label}`}
+            >
+              <Box size={15} />
+              <span>{item.filename}</span>
+              <em>{active === key ? "EN VISOR" : "IFC4.3"}</em>
+            </button>
+          );
+        })}
+      </div>,
+      treeHost,
     );
   }, [active, treeHost]);
 
   const stagePortal = useMemo(() => {
-    const host = stageHost;
-    if (!host || active === "BRIDGE") return null;
+    if (!stageHost) return null;
     return createPortal(
-      <div className="bim-switch-overlay">
-        <style>{`
-          .bim-model-switcher-tree-host{display:contents}
-          .bim-tree-model{width:100%;border:0;text-align:left;cursor:pointer}
-          .bim-switch-overlay{position:absolute;inset:0;z-index:40;background:#eef3f8;overflow:hidden}
-          .bim-switch-viewport{position:absolute;inset:0}
-          .bim-switch-badge{position:absolute;z-index:3;left:12px;top:12px;padding:8px 10px;background:rgba(255,255,255,.96);border:1px solid #ced9e5;border-radius:6px;box-shadow:0 4px 14px rgba(15,23,42,.11)}
-          .bim-switch-badge div{display:flex;align-items:center;gap:6px;color:#24364d;font-size:10.5px;font-weight:800}.bim-switch-badge span{display:block;margin-top:4px;color:#b45309;font-size:9px;font-weight:800}
-          .bim-switch-actions{position:absolute;z-index:3;right:12px;top:12px;display:flex;gap:5px}.bim-switch-actions button,.bim-switch-actions a{height:31px;display:flex;align-items:center;gap:5px;padding:0 9px;color:#334155;background:rgba(255,255,255,.96);border:1px solid #cbd5e1;border-radius:5px;font-size:9.5px;font-weight:700;text-decoration:none;cursor:pointer}.bim-switch-actions .active{color:#fff;background:#0b7acb;border-color:#0b7acb}
-          .bim-switch-provenance{position:absolute;z-index:3;left:12px;right:12px;bottom:47px;padding:8px 10px;background:rgba(255,255,255,.92);border:1px solid #d8e1eb;border-radius:5px;color:#475569;font-size:9.5px}.bim-switch-provenance strong{display:block;color:#24364d;font-size:10.5px}.bim-switch-provenance span{display:block;margin-top:2px}.bim-switch-warning{color:#b45309!important}
-          .bim-switch-toolbar{position:absolute;z-index:3;left:50%;bottom:10px;transform:translateX(-50%);display:flex;overflow:hidden;background:#fff;border:1px solid #ccd7e2;border-radius:16px;box-shadow:0 3px 10px rgba(15,23,42,.12)}.bim-switch-toolbar button{min-width:52px;padding:6px 10px;border:0;background:#fff;color:#64748b;font-size:9px;cursor:pointer}.bim-switch-toolbar button.active{color:#172033;background:#facc15;font-weight:800}
-        `}</style>
-        <div ref={viewportRef} className="bim-switch-viewport" />
-        <div className="bim-switch-badge"><div><Box size={17} /><strong>{model.code}</strong></div><span>IFC4X3_ADD2 · PRELIMINAR_NO_VALIDADO</span></div>
-        <div className="bim-switch-actions">
-          <button type="button" className={autoRotate ? "active" : ""} onClick={() => setAutoRotate((value) => !value)}><RotateCcw size={14} /> Rotar</button>
-          <button type="button" onClick={() => setResetNonce((value) => value + 1)}><Crosshair size={14} /> Centrar</button>
-          <a href={model.url} download><Download size={14} /> IFC 4.3</a>
+      <>
+        {active !== "BRIDGE" && (
+          <div className="bim-switch-overlay">
+            <div ref={viewportRef} className="bim-switch-viewport" />
+            <div className="bim-switch-badge">
+              <div><Box size={17} /><strong>{model.code}</strong></div>
+              <span>IFC4X3_ADD2 · PRELIMINAR_NO_VALIDADO</span>
+            </div>
+            <div className="bim-switch-actions">
+              <button type="button" className={autoRotate ? "active" : ""} onClick={() => setAutoRotate((value) => !value)}><RotateCcw size={14} /> Rotar</button>
+              <button type="button" onClick={() => setResetNonce((value) => value + 1)}><Crosshair size={14} /> Centrar</button>
+              <button type="button" onClick={showInGis}><Eye size={14} /> Ver en GIS</button>
+              <a href={model.url} download><Download size={14} /> IFC 4.3</a>
+            </div>
+            <div className="bim-switch-provenance">
+              <strong>{model.provenance}</strong>
+              <span>{model.detail}</span>
+              <span className="bim-switch-warning">Geometría 3D de visualización preliminar; falta conciliación completa con DWG conforme a obra. No usar para replanteo.</span>
+            </div>
+            <div className="bim-switch-toolbar">
+              {(["3D", "PLANTA", "ALZADO"] as BimView[]).map((item) => (
+                <button key={item} type="button" className={view === item ? "active" : ""} onClick={() => setView(item)}>{item}</button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="bim-model-picker" aria-label="Seleccionar modelo IFC">
+          <span>MODELO IFC</span>
+          {MODEL_ORDER.map((key) => (
+            <button key={key} type="button" className={active === key ? "active" : ""} onClick={() => chooseModel(key)}>
+              <Box size={13} /> {MODELS[key].shortLabel}
+            </button>
+          ))}
         </div>
-        <div className="bim-switch-provenance"><strong>{model.provenance}</strong><span>{model.detail}</span><span className="bim-switch-warning">Geometría 3D de visualización preliminar; falta conciliación completa con DWG conforme a obra. No usar para replanteo.</span></div>
-        <div className="bim-switch-toolbar">{(["3D", "PLANTA", "ALZADO"] as BimView[]).map((item) => <button key={item} type="button" className={view === item ? "active" : ""} onClick={() => setView(item)}>{item}</button>)}</div>
-      </div>,
-      host,
+      </>,
+      stageHost,
     );
   }, [active, autoRotate, model.code, model.detail, model.provenance, model.url, stageHost, view]);
 
-  return <>{treePortal}{stagePortal}</>;
+  return (
+    <>
+      <style>{`
+        .bim-model-switcher-tree-host{display:block;width:100%}
+        .bim-tree-model-list{display:block;width:100%}
+        .bim-tree-model{width:100%;border:0;text-align:left;cursor:pointer}
+        .bim-tree-model.active{background:#e8f4ff!important;color:#075985!important;box-shadow:inset 3px 0 #0b7acb}
+        .bim-tree-model.active em{color:#0b7acb!important;font-weight:900}
+        .bim-switch-overlay{position:absolute;inset:0;z-index:40;background:#eef3f8;overflow:hidden}
+        .bim-switch-viewport{position:absolute;inset:0}
+        .bim-switch-badge{position:absolute;z-index:43;left:12px;top:12px;padding:8px 10px;background:rgba(255,255,255,.96);border:1px solid #ced9e5;border-radius:6px;box-shadow:0 4px 14px rgba(15,23,42,.11)}
+        .bim-switch-badge div{display:flex;align-items:center;gap:6px;color:#24364d;font-size:10.5px;font-weight:800}.bim-switch-badge span{display:block;margin-top:4px;color:#b45309;font-size:9px;font-weight:800}
+        .bim-switch-actions{position:absolute;z-index:43;right:12px;top:12px;display:flex;gap:5px}.bim-switch-actions button,.bim-switch-actions a{height:31px;display:flex;align-items:center;gap:5px;padding:0 9px;color:#334155;background:rgba(255,255,255,.96);border:1px solid #cbd5e1;border-radius:5px;font-size:9.5px;font-weight:700;text-decoration:none;cursor:pointer}.bim-switch-actions button:hover,.bim-switch-actions a:hover{color:#0b7acb;border-color:#0b7acb}.bim-switch-actions .active{color:#fff;background:#0b7acb;border-color:#0b7acb}
+        .bim-switch-provenance{position:absolute;z-index:43;left:12px;right:12px;bottom:47px;padding:8px 10px;background:rgba(255,255,255,.92);border:1px solid #d8e1eb;border-radius:5px;color:#475569;font-size:9.5px}.bim-switch-provenance strong{display:block;color:#24364d;font-size:10.5px}.bim-switch-provenance span{display:block;margin-top:2px}.bim-switch-warning{color:#b45309!important}
+        .bim-switch-toolbar{position:absolute;z-index:43;left:50%;bottom:10px;transform:translateX(-50%);display:flex;overflow:hidden;background:#fff;border:1px solid #ccd7e2;border-radius:16px;box-shadow:0 3px 10px rgba(15,23,42,.12)}.bim-switch-toolbar button{min-width:52px;padding:6px 10px;border:0;background:#fff;color:#64748b;font-size:9px;cursor:pointer}.bim-switch-toolbar button.active{color:#172033;background:#facc15;font-weight:800}
+        .bim-model-picker{position:absolute;z-index:80;top:12px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:3px;padding:4px;background:rgba(255,255,255,.96);border:1px solid #cbd5e1;border-radius:7px;box-shadow:0 4px 16px rgba(15,23,42,.14);white-space:nowrap}.bim-model-picker>span{padding:0 6px;color:#64748b;font-size:8px;font-weight:900;letter-spacing:.05em}.bim-model-picker button{height:27px;display:flex;align-items:center;gap:4px;padding:0 8px;color:#475569;background:#fff;border:1px solid transparent;border-radius:4px;font-size:9px;font-weight:800;cursor:pointer}.bim-model-picker button:hover{color:#0b7acb;background:#eff6ff}.bim-model-picker button.active{color:#fff;background:#0b7acb;border-color:#0b7acb}
+        @media(max-width:1250px){.bim-model-picker>span{display:none}.bim-model-picker button{padding:0 6px}.bim-switch-actions button{padding:0 6px}.bim-switch-actions button{font-size:0}.bim-switch-actions button svg{margin:0}}
+      `}</style>
+      {treePortal}
+      {stagePortal}
+    </>
+  );
 }
