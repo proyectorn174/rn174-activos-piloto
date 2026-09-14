@@ -23,6 +23,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import type {
   GeoJSON as LeafletGeoJSON,
   LeafletMouseEvent,
@@ -62,6 +63,7 @@ type AssetProperties = {
   desplazamiento_m?: number;
   lado?: string;
   es_preliminar?: boolean;
+  atributos?: Record<string, unknown>;
 };
 
 type AssetFeature = {
@@ -136,6 +138,96 @@ function formatPk(value?: number, label?: string) {
   return `PK ${km}+${meters.toFixed(2).padStart(6, "0")}`;
 }
 
+function safeName(value: string) {
+  return value.replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, "_");
+}
+
+function escapeXml(value: unknown) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function coordinatesText(coords: unknown) {
+  const tuple = coords as number[];
+  return `${tuple[0]},${tuple[1]}${tuple.length > 2 ? `,${tuple[2]}` : ",0"}`;
+}
+
+function lineCoordinates(coords: unknown) {
+  return (coords as number[][]).map((item) => coordinatesText(item)).join(" ");
+}
+
+function geometryToKml(geometry: AssetFeature["geometry"]): string {
+  const c = geometry.coordinates as any;
+  switch (geometry.type) {
+    case "Point":
+      return `<Point><coordinates>${coordinatesText(c)}</coordinates></Point>`;
+    case "MultiPoint":
+      return `<MultiGeometry>${c.map((p: unknown) => `<Point><coordinates>${coordinatesText(p)}</coordinates></Point>`).join("")}</MultiGeometry>`;
+    case "LineString":
+      return `<LineString><tessellate>1</tessellate><coordinates>${lineCoordinates(c)}</coordinates></LineString>`;
+    case "MultiLineString":
+      return `<MultiGeometry>${c.map((l: unknown) => `<LineString><tessellate>1</tessellate><coordinates>${lineCoordinates(l)}</coordinates></LineString>`).join("")}</MultiGeometry>`;
+    case "Polygon": {
+      const rings = c as number[][][];
+      const outer = rings[0] ?? [];
+      const inners = rings.slice(1);
+      return `<Polygon><tessellate>1</tessellate><outerBoundaryIs><LinearRing><coordinates>${lineCoordinates(outer)}</coordinates></LinearRing></outerBoundaryIs>${inners.map((ring) => `<innerBoundaryIs><LinearRing><coordinates>${lineCoordinates(ring)}</coordinates></LinearRing></innerBoundaryIs>`).join("")}</Polygon>`;
+    }
+    case "MultiPolygon":
+      return `<MultiGeometry>${(c as number[][][][]).map((polygon) => geometryToKml({ type: "Polygon", coordinates: polygon })).join("")}</MultiGeometry>`;
+    default:
+      return "";
+  }
+}
+
+function featureToKml(feature: AssetFeature) {
+  const p = feature.properties;
+  const name = p.nombre ?? p.codigo ?? feature.id ?? "Activo RN174";
+  const description = [
+    ["asset_id", feature.id],
+    ["codigo", p.codigo],
+    ["tipo", p.tipo_activo ?? p.tipo],
+    ["familia", p.familia],
+    ["ruta", p.ruta],
+    ["progresiva", p.progresiva ?? p.progresiva_inicio_m],
+    ["progresiva_fin_m", p.progresiva_fin_m],
+    ["lado", p.lado],
+    ["estado_validacion", p.estado_validacion],
+    ["calidad_dato", p.calidad_dato],
+    ["precision_m", p.precision_m],
+    ["metodo_posicion", p.metodo_posicion],
+    ["lote_origen", p.lote_origen],
+  ]
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `${key}: ${value}`)
+    .join("\n");
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+  <name>${escapeXml(name)}</name>
+  <Placemark>
+    <name>${escapeXml(name)}</name>
+    <description><![CDATA[${description}]]></description>
+    ${geometryToKml(feature.geometry)}
+  </Placemark>
+</Document>
+</kml>`;
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 function RouteShield() {
   return (
     <div className="rn-shield" aria-label="Ruta Nacional 174">
@@ -168,6 +260,7 @@ export function Rn174Viewer() {
   const [bimView, setBimView] = useState<BimView>("3D");
   const [autoRotate, setAutoRotate] = useState(false);
   const [bimResetNonce, setBimResetNonce] = useState(0);
+  const [panelWidths, setPanelWidths] = useState<[number, number, number]>([34, 33, 33]);
 
   const mapNodeRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<LeafletMap | null>(null);
@@ -406,12 +499,10 @@ export function Rn174Viewer() {
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-
     const clickHandler = (event: LeafletMouseEvent) => {
       if (!measureEnabled) return;
       setMeasurePoints((current) => [...current, [event.latlng.lat, event.latlng.lng]]);
     };
-
     map.on("click", clickHandler);
     return () => {
       map.off("click", clickHandler);
@@ -437,6 +528,11 @@ export function Rn174Viewer() {
     }
     setMeasureDistance(total);
   }, [measurePoints]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => mapRef.current?.invalidateSize({ animate: false }), 30);
+    return () => window.clearTimeout(timer);
+  }, [panelWidths]);
 
   const clearMeasure = useCallback(() => {
     measureLayerRef.current?.remove();
@@ -470,15 +566,108 @@ export function Rn174Viewer() {
     if (bridgeFeature?.id) setSelectedId(bridgeFeature.id);
   };
 
-  const downloadSelected = () => {
+  const startResize = (divider: 0 | 1, event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const start = [...panelWidths] as [number, number, number];
+    document.body.classList.add("panel-resizing");
+
+    const onMove = (moveEvent: PointerEvent) => {
+      const delta = ((moveEvent.clientX - startX) / window.innerWidth) * 100;
+      if (divider === 0) {
+        const pair = start[0] + start[1];
+        const first = Math.max(18, Math.min(pair - 18, start[0] + delta));
+        setPanelWidths([first, pair - first, start[2]]);
+      } else {
+        const pair = start[1] + start[2];
+        const second = Math.max(18, Math.min(pair - 18, start[1] + delta));
+        setPanelWidths([start[0], second, pair - second]);
+      }
+    };
+
+    const onUp = () => {
+      document.body.classList.remove("panel-resizing");
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+  };
+
+  const downloadGeoJson = () => {
     if (!selectedFeature) return;
-    const blob = new Blob([JSON.stringify(selectedFeature, null, 2)], { type: "application/geo+json" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `${selectedFeature.properties.codigo ?? selectedFeature.id ?? "RN174_activo"}.geojson`;
-    anchor.click();
-    URL.revokeObjectURL(url);
+    const filename = safeName(selectedFeature.properties.codigo ?? selectedFeature.id ?? "RN174_activo");
+    downloadBlob(
+      new Blob([JSON.stringify(selectedFeature, null, 2)], { type: "application/geo+json" }),
+      `${filename}.geojson`,
+    );
+  };
+
+  const downloadKml = () => {
+    if (!selectedFeature) return;
+    const filename = safeName(selectedFeature.properties.codigo ?? selectedFeature.id ?? "RN174_activo");
+    downloadBlob(
+      new Blob([featureToKml(selectedFeature)], { type: "application/vnd.google-earth.kml+xml;charset=utf-8" }),
+      `${filename}.kml`,
+    );
+  };
+
+  const downloadKmz = async () => {
+    if (!selectedFeature) return;
+    const filename = safeName(selectedFeature.properties.codigo ?? selectedFeature.id ?? "RN174_activo");
+    const JSZipModule = await import("jszip");
+    const zip = new JSZipModule.default();
+    zip.file("doc.kml", featureToKml(selectedFeature));
+    const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
+    downloadBlob(blob, `${filename}.kmz`);
+  };
+
+  const downloadXlsx = async () => {
+    if (!selectedFeature) return;
+    const XLSX = await import("xlsx");
+    const p = selectedFeature.properties;
+    const filename = safeName(p.codigo ?? selectedFeature.id ?? "RN174_activo");
+    const row = {
+      asset_id: selectedFeature.id ?? "",
+      codigo: p.codigo ?? "",
+      nombre: p.nombre ?? "",
+      ruta: p.ruta ?? "RN174",
+      familia: p.familia ?? "",
+      tipo_codigo: p.tipo_codigo ?? "",
+      tipo_activo: p.tipo_activo ?? p.tipo ?? "",
+      geometria: geometryClass(selectedFeature),
+      progresiva: p.progresiva ?? "",
+      progresiva_inicio_m: p.progresiva_inicio_m ?? p.progresiva_m ?? "",
+      progresiva_fin_m: p.progresiva_fin_m ?? "",
+      desplazamiento_m: p.desplazamiento_m ?? "",
+      lado: p.lado ?? "",
+      estado_existencia: p.origen_existencia ?? "",
+      estado_ciclo_vida: p.estado_ciclo_vida ?? "",
+      estado_validacion: p.estado_validacion ?? "",
+      calidad_dato: p.calidad_dato ?? "",
+      precision_m: p.precision_m ?? "",
+      metodo_posicion: p.metodo_posicion ?? "",
+      lote_origen: p.lote_origen ?? "",
+      actualizado_en: p.actualizado_en ?? "",
+      observaciones: p.observaciones ?? "",
+      es_preliminar: p.es_preliminar ?? false,
+    };
+    const wb = XLSX.utils.book_new();
+    const ficha = XLSX.utils.json_to_sheet([row]);
+    ficha["!cols"] = Object.keys(row).map((key) => ({ wch: Math.max(15, key.length + 2) }));
+    XLSX.utils.book_append_sheet(wb, ficha, "Ficha activo");
+
+    const geom = XLSX.utils.json_to_sheet([
+      {
+        tipo_geometria: selectedFeature.geometry.type,
+        geojson: JSON.stringify(selectedFeature.geometry),
+      },
+    ]);
+    geom["!cols"] = [{ wch: 22 }, { wch: 100 }];
+    XLSX.utils.book_append_sheet(wb, geom, "Geometria");
+
+    XLSX.writeFile(wb, `${filename}_ficha.xlsx`);
   };
 
   useEffect(() => {
@@ -548,8 +737,7 @@ export function Rn174Viewer() {
       createPier(-295, 52, 8, 14);
       createPier(295, 52, 8, 14);
 
-      const pylonXs = [-175, 175];
-      for (const x of pylonXs) {
+      for (const x of [-175, 175]) {
         for (const z of [-7, 7]) {
           const leg = new THREE.Mesh(new THREE.BoxGeometry(5, 126, 4), concrete);
           leg.position.set(x, 12.5, z);
@@ -640,6 +828,35 @@ export function Rn174Viewer() {
 
   return (
     <main className="cde-shell">
+      <style>{`
+        .cde-shell{grid-template-rows:64px 32px minmax(0,1fr) 88px!important}
+        .cde-topbar{font-size:13px!important}
+        .cde-brand-line strong{font-size:16px!important}.cde-brand-line span{font-size:13px!important}.cde-brand small{font-size:11px!important}
+        .global-search-wrap{height:39px!important}.global-search-wrap input{font-size:13px!important}
+        .global-search-results button span{font-size:11px!important}.global-search-results button strong{font-size:12px!important}.global-search-results button small{font-size:10.5px!important}
+        .sync-badge{font-size:11px!important}.preliminary-strip,.preliminary-strip strong{font-size:10.5px!important}
+        .panel-titlebar{height:40px!important;font-size:11.5px!important}.panel-titlebar strong{font-size:12.5px!important}.panel-titlebar span{font-size:11px!important}.panel-titlebar small{font-size:10px!important}
+        .work-panel{grid-template-rows:40px minmax(0,1fr)!important;border-right:0!important}
+        .gis-tools-card{width:276px!important}.tools-heading{font-size:12px!important}.layer-toggle{min-height:30px!important;font-size:10.5px!important}.layer-toggle b{font-size:10px!important}
+        .filter-block label>span{font-size:9.5px!important}.filter-block select,.filter-block input{height:31px!important;font-size:10.5px!important}
+        .gis-tool-buttons button{font-size:9.5px!important;padding:7px 4px!important}.measure-readout{font-size:10px!important}.measure-readout button{font-size:9px!important}
+        .map-switcher button{font-size:10px!important}.map-hint{font-size:9.5px!important}
+        .gis-selection-card{width:310px!important}.selection-card-top strong{font-size:11px!important}.selection-card-top span{font-size:10.5px!important}.gis-selection-card h3{font-size:13px!important}.gis-selection-card dt{font-size:9.5px!important}.gis-selection-card dd{font-size:10px!important}.selection-sync{font-size:9.5px!important}
+        .bim-model-badge strong{font-size:10.5px!important}.bim-model-badge span{font-size:9.5px!important}.bim-provenance{font-size:9.5px!important}.bim-provenance strong{font-size:10.5px!important}
+        .bim-actions button,.bim-actions a{height:31px!important;font-size:9.5px!important}.bim-toolbar button{font-size:9.5px!important}
+        .tree-heading{font-size:11px!important}.tree-node{min-height:31px!important;font-size:9.8px!important}.tree-node em{font-size:9px!important}
+        .doc-inspector-head{font-size:11px!important}.doc-inspector table{font-size:10px!important}.doc-inspector th,.doc-inspector td{padding:5px 7px!important}
+        .doc-note,.bridge-document-card{font-size:10px!important}
+        .asset-dock{font-size:10.5px!important}.dock-identity strong{font-size:12px!important}.dock-field span{font-size:9px!important}.dock-field b{font-size:10.5px!important}.dock-field small{font-size:9.5px!important}
+        .panel-resizer{position:relative;z-index:1500;cursor:col-resize;background:#d6dee8;box-shadow:inset 1px 0 #fff,inset -1px 0 #fff;touch-action:none}
+        .panel-resizer::after{content:"⋮";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:18px;height:44px;display:grid;place-items:center;color:#64748b;background:#f8fafc;border:1px solid #cbd5e1;border-radius:10px;font-size:24px;line-height:1}
+        .panel-resizer:hover,.panel-resizing .panel-resizer{background:#0b7acb}.panel-resizing{cursor:col-resize!important;user-select:none!important}
+        .download-group{display:flex;align-items:center;gap:5px;flex-wrap:wrap}.download-group button{display:inline-flex;align-items:center;gap:4px;padding:7px 9px;border:1px solid #cbd5e1;border-radius:5px;background:#fff;color:#334155;font-size:10px;font-weight:750;cursor:pointer}
+        .download-group button:hover{background:#0b7acb;color:#fff;border-color:#0b7acb}.download-group button:disabled{opacity:.45;cursor:not-allowed}
+        .asset-dock .download-group{justify-content:flex-end}.asset-dock .download-group button{padding:8px 10px}
+        @media(max-width:1180px){.gis-tools-card{width:250px!important}.asset-dock .dock-field:nth-of-type(3){display:none}}
+      `}</style>
+
       <header className="cde-topbar">
         <div className="cde-brand">
           <RouteShield />
@@ -653,7 +870,7 @@ export function Rn174Viewer() {
         </div>
 
         <div className="global-search-wrap">
-          <Search size={15} />
+          <Search size={17} />
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -663,7 +880,7 @@ export function Rn174Viewer() {
             placeholder="Buscar asset_id, código, nombre, PK, tipo, lote..."
           />
           {query && (
-            <button className="search-clear" type="button" onClick={() => setQuery("")} aria-label="Limpiar búsqueda"><X size={13} /></button>
+            <button className="search-clear" type="button" onClick={() => setQuery("")} aria-label="Limpiar búsqueda"><X size={15} /></button>
           )}
           {query && (
             <div className="global-search-results">
@@ -679,30 +896,35 @@ export function Rn174Viewer() {
         </div>
 
         <div className="cde-status-zone">
-          <div className="sync-badge"><Database size={14} /> Supabase V3.2 · {datasetTotal}</div>
+          <div className="sync-badge"><Database size={15} /> Supabase V3.2 · {datasetTotal}</div>
           <button className="refresh-button" type="button" onClick={() => void loadAssets()} title="Actualizar inventario">
-            <RefreshCw size={15} className={loading ? "spin" : ""} />
+            <RefreshCw size={16} className={loading ? "spin" : ""} />
           </button>
         </div>
       </header>
 
       <div className="preliminary-strip">
-        <AlertTriangle size={13} />
+        <AlertTriangle size={14} />
         <strong>PUBLICACIÓN ABIERTA TEMPORAL:</strong>
         <span>se muestran datos BORRADOR / EN REVISIÓN / APROBADOS. Visible no significa validado.</span>
       </div>
 
-      <section className="cde-workspace">
+      <section
+        className="cde-workspace"
+        style={{
+          gridTemplateColumns: `${panelWidths[0]}fr 8px ${panelWidths[1]}fr 8px ${panelWidths[2]}fr`,
+        }}
+      >
         <article className="work-panel gis-panel">
           <div className="panel-titlebar">
-            <div><MapIcon size={15} /><strong>1. PANTALLA GIS</strong><span>Inventario georreferenciado</span></div>
+            <div><MapIcon size={17} /><strong>1. PANTALLA GIS</strong><span>Inventario georreferenciado</span></div>
             <small>{visibleTotal} visibles / {datasetTotal} total</small>
           </div>
           <div className="panel-body map-body">
             <div ref={mapNodeRef} className={`gis-map ${measureEnabled ? "measure-mode" : ""}`} />
 
             <div className="gis-tools-card">
-              <div className="tools-heading"><Layers3 size={15} /><strong>Capas y filtros RN174</strong></div>
+              <div className="tools-heading"><Layers3 size={16} /><strong>Capas y filtros RN174</strong></div>
               {(["PUNTO", "LINEA", "POLIGONO"] as GeometryClass[]).map((geometry) => (
                 <label key={geometry} className="layer-toggle">
                   <input
@@ -736,7 +958,7 @@ export function Rn174Viewer() {
               </div>
 
               <div className="gis-tool-buttons">
-                <button type="button" onClick={fitVisible}><Maximize2 size={13} /> Encuadrar</button>
+                <button type="button" onClick={fitVisible}><Maximize2 size={14} /> Encuadrar</button>
                 <button
                   type="button"
                   className={measureEnabled ? "active" : ""}
@@ -744,13 +966,13 @@ export function Rn174Viewer() {
                     setMeasureEnabled((value) => !value);
                     if (measureEnabled) clearMeasure();
                   }}
-                ><Ruler size={13} /> Medir</button>
-                <button type="button" onClick={resetFilters}><Filter size={13} /> Limpiar</button>
+                ><Ruler size={14} /> Medir</button>
+                <button type="button" onClick={resetFilters}><Filter size={14} /> Limpiar</button>
               </div>
 
               {measureEnabled && (
                 <div className="measure-readout">
-                  <Ruler size={13} />
+                  <Ruler size={14} />
                   <span>{measurePoints.length < 2 ? "Haga clic en 2 o más puntos" : measureDistance >= 1000 ? `${(measureDistance / 1000).toFixed(3)} km` : `${measureDistance.toFixed(1)} m`}</span>
                   <button type="button" onClick={clearMeasure}>Borrar</button>
                 </div>
@@ -763,7 +985,7 @@ export function Rn174Viewer() {
               ))}
             </div>
 
-            <div className="map-hint"><MousePointer2 size={12} /> clic en un activo = consulta sincronizada</div>
+            <div className="map-hint"><MousePointer2 size={13} /> clic en un activo = consulta sincronizada</div>
 
             {selectedFeature && (
               <div className="gis-selection-card">
@@ -778,7 +1000,7 @@ export function Rn174Viewer() {
                   <div><dt>Fuente</dt><dd>{display(p?.lote_origen)}</dd></div>
                   <div><dt>Geometría</dt><dd>{selectedGeometry}</dd></div>
                 </dl>
-                <div className="selection-sync">Activo seleccionado para GIS · BIM · CDE <ChevronRight size={14} /></div>
+                <div className="selection-sync">Activo seleccionado para GIS · BIM · CDE <ChevronRight size={15} /></div>
               </div>
             )}
 
@@ -786,16 +1008,18 @@ export function Rn174Viewer() {
           </div>
         </article>
 
+        <div className="panel-resizer" title="Arrastrar para cambiar ancho" onPointerDown={(event) => startResize(0, event)} />
+
         <article className="work-panel bim-panel">
           <div className="panel-titlebar">
-            <div><Box size={15} /><strong>2. PANTALLA IFC 3D</strong><span>Puente Principal · IFC4.3</span></div>
+            <div><Box size={17} /><strong>2. PANTALLA IFC 3D</strong><span>Puente Principal · IFC4.3</span></div>
             <small>{bridgeSelected ? "GIS vinculado" : "modelo maestro"}</small>
           </div>
           <div className="panel-body bim-stage">
             <div ref={threeNodeRef} className="three-viewport" />
 
             <div className="bim-model-badge">
-              <div><Box size={16} /><strong>RN174-P-PUENTE-PRINCIPAL</strong></div>
+              <div><Box size={17} /><strong>RN174-P-PUENTE-PRINCIPAL</strong></div>
               <span>IFC4X3_ADD2 · PRELIMINAR_NO_VALIDADO</span>
             </div>
 
@@ -806,10 +1030,10 @@ export function Rn174Viewer() {
             </div>
 
             <div className="bim-actions">
-              <button type="button" onClick={() => setAutoRotate((value) => !value)} className={autoRotate ? "active" : ""}><RotateCcw size={13} /> Rotar</button>
-              <button type="button" onClick={() => setBimResetNonce((value) => value + 1)}><Crosshair size={13} /> Centrar</button>
-              <button type="button" onClick={selectBridge} disabled={!bridgeFeature}><Eye size={13} /> Ver en GIS</button>
-              <a href={IFC_URL} download><Download size={13} /> IFC 4.3</a>
+              <button type="button" onClick={() => setAutoRotate((value) => !value)} className={autoRotate ? "active" : ""}><RotateCcw size={14} /> Rotar</button>
+              <button type="button" onClick={() => setBimResetNonce((value) => value + 1)}><Crosshair size={14} /> Centrar</button>
+              <button type="button" onClick={selectBridge} disabled={!bridgeFeature}><Eye size={14} /> Ver en GIS</button>
+              <a href={IFC_URL} download><Download size={14} /> IFC 4.3</a>
             </div>
 
             <div className="bim-toolbar">
@@ -820,26 +1044,28 @@ export function Rn174Viewer() {
           </div>
         </article>
 
+        <div className="panel-resizer" title="Arrastrar para cambiar ancho" onPointerDown={(event) => startResize(1, event)} />
+
         <article className="work-panel docs-panel">
           <div className="panel-titlebar cde-titlebar">
-            <div><Folder size={15} /><strong>3. PANTALLA CDE</strong><span>Árbol documental</span></div>
+            <div><Folder size={17} /><strong>3. PANTALLA CDE</strong><span>Árbol documental</span></div>
             <small>CDE · trazabilidad</small>
           </div>
           <div className="panel-body docs-body">
             <section className="tree-card">
-              <div className="tree-heading"><Folder size={15} /><strong>CDE_RN174_MASTER</strong></div>
-              <div className="tree-node level-1 open"><ChevronRight size={13} /><Folder size={14} /><span>01_MODELOS_BIM</span><em>1 modelo</em></div>
-              <a className="tree-node level-2 active" href={IFC_URL} download><Box size={14} /><span>RN174_PUENTE_PRINCIPAL_IFC4X3_PRELIMINAR.ifc</span><em>IFC4.3</em></a>
-              <div className="tree-node level-1"><ChevronRight size={13} /><Folder size={14} /><span>02_PROYECTO_Y_CONFORME_A_OBRA</span><em>catalogado</em></div>
-              <div className="tree-node level-1 open"><ChevronRight size={13} /><Folder size={14} /><span>03_FUENTES_E_INVENTARIOS</span></div>
-              <div className="tree-node level-2 active"><FileText size={14} /><span>{display(p?.lote_origen, "Sin lote documental")}</span><em>fuente GIS</em></div>
-              <div className="tree-node level-1 open"><ChevronRight size={13} /><Folder size={14} /><span>04_ACTIVOS_RN174</span></div>
-              <div className="tree-node level-2 active"><CircleDot size={14} /><span>{selectedAssetId}</span><em>{selectedType}</em></div>
+              <div className="tree-heading"><Folder size={16} /><strong>CDE_RN174_MASTER</strong></div>
+              <div className="tree-node level-1 open"><ChevronRight size={14} /><Folder size={15} /><span>01_MODELOS_BIM</span><em>1 modelo</em></div>
+              <a className="tree-node level-2 active" href={IFC_URL} download><Box size={15} /><span>RN174_PUENTE_PRINCIPAL_IFC4X3_PRELIMINAR.ifc</span><em>IFC4.3</em></a>
+              <div className="tree-node level-1"><ChevronRight size={14} /><Folder size={15} /><span>02_PROYECTO_Y_CONFORME_A_OBRA</span><em>catalogado</em></div>
+              <div className="tree-node level-1 open"><ChevronRight size={14} /><Folder size={15} /><span>03_FUENTES_E_INVENTARIOS</span></div>
+              <div className="tree-node level-2 active"><FileText size={15} /><span>{display(p?.lote_origen, "Sin lote documental")}</span><em>fuente GIS</em></div>
+              <div className="tree-node level-1 open"><ChevronRight size={14} /><Folder size={15} /><span>04_ACTIVOS_RN174</span></div>
+              <div className="tree-node level-2 active"><CircleDot size={15} /><span>{selectedAssetId}</span><em>{selectedType}</em></div>
             </section>
 
             <section className="doc-inspector">
               <div className="doc-inspector-head">
-                <div><FileText size={15} /><strong>FICHA DEL ACTIVO · V3.2</strong></div>
+                <div><FileText size={16} /><strong>FICHA DEL ACTIVO · V3.2</strong></div>
                 <span className={p?.estado_validacion === "APROBADO" ? "published-pill" : "preliminary-pill"}>{display(p?.estado_validacion, "SIN ESTADO")}</span>
               </div>
               <table>
@@ -862,6 +1088,18 @@ export function Rn174Viewer() {
                 <strong>Estado documental</strong>
                 <p>{p?.observaciones ? p.observaciones : "Activo publicado temporalmente para consulta. La visibilidad web no implica validación técnica."}</p>
               </div>
+
+              <div className="bridge-document-card">
+                <div><FileText size={16} /><strong>Descargas del activo seleccionado</strong></div>
+                <p>Ficha tabular y geometría exportable para trabajo de campo, QGIS y Google Earth.</p>
+                <div className="download-group">
+                  <button type="button" onClick={() => void downloadXlsx()} disabled={!selectedFeature}><Download size={13} /> XLSX</button>
+                  <button type="button" onClick={downloadKml} disabled={!selectedFeature}><Download size={13} /> KML</button>
+                  <button type="button" onClick={() => void downloadKmz()} disabled={!selectedFeature}><Download size={13} /> KMZ</button>
+                  <button type="button" onClick={downloadGeoJson} disabled={!selectedFeature}><Download size={13} /> GeoJSON</button>
+                </div>
+              </div>
+
               <div className="bridge-document-card">
                 <div><Box size={16} /><strong>Puente Principal · AIM/IFC</strong></div>
                 <p>Primer activo BIM real del sistema. El IFC4.3 conserva trazabilidad de fuente y estado PRELIMINAR.</p>
@@ -881,7 +1119,11 @@ export function Rn174Viewer() {
         <div className="dock-field"><span>FAMILIA</span><b>{display(p?.familia)}</b><small>{selectedGeometry ?? "—"}</small></div>
         <div className="dock-field"><span>FILTRO GIS</span><b>{visibleTotal} / {datasetTotal}</b><small>activos visibles</small></div>
         <div className="dock-field"><span>SINCRONIZACIÓN</span><b>{loading ? "ACTUALIZANDO" : "GIS ACTIVO"}</b><small>{loadedAt ? loadedAt.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" }) : "—"}</small></div>
-        <button type="button" className="dock-download" onClick={downloadSelected} disabled={!selectedFeature}><Download size={15} /> GeoJSON activo</button>
+        <div className="download-group">
+          <button type="button" onClick={() => void downloadXlsx()} disabled={!selectedFeature}><Download size={14} /> XLSX</button>
+          <button type="button" onClick={downloadKml} disabled={!selectedFeature}><Download size={14} /> KML</button>
+          <button type="button" onClick={() => void downloadKmz()} disabled={!selectedFeature}><Download size={14} /> KMZ</button>
+        </div>
       </footer>
     </main>
   );
