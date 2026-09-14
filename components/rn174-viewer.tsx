@@ -20,6 +20,7 @@ import {
   RotateCcw,
   Ruler,
   Search,
+  Upload,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -83,6 +84,17 @@ type AssetCollection = {
     estado_publicacion?: string;
     advertencia?: string;
   };
+};
+
+type ExternalFeature = {
+  type: "Feature";
+  geometry: unknown;
+  properties: Record<string, unknown>;
+};
+
+type ExternalCollection = {
+  type: "FeatureCollection";
+  features: ExternalFeature[];
 };
 
 const SUPABASE_URL =
@@ -149,6 +161,10 @@ function escapeXml(value: unknown) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
+}
+
+function escapeHtml(value: unknown) {
+  return escapeXml(value);
 }
 
 function coordinatesText(coords: unknown) {
@@ -228,6 +244,87 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
+function selectionPopupHtml(feature: AssetFeature) {
+  const p = feature.properties;
+  const code = p.codigo ?? feature.id ?? "Activo RN174";
+  const pk = formatPk(p.progresiva_inicio_m ?? p.progresiva_m, p.progresiva);
+  const title = p.nombre ?? p.tipo_activo ?? p.tipo ?? "Activo vial";
+  const family = p.familia ?? "—";
+  return `
+    <div class="asset-callout-card">
+      <div class="asset-callout-top"><strong>${escapeHtml(code)}</strong><span>${escapeHtml(pk)}</span></div>
+      <h3>${escapeHtml(title)}</h3>
+      <div class="asset-callout-family"><span>Familia</span><b>${escapeHtml(family)}</b></div>
+    </div>`;
+}
+
+function descendantsByLocalName(root: Element | Document, localName: string) {
+  return Array.from(root.getElementsByTagName("*")).filter((element) => element.localName === localName);
+}
+
+function firstDescendant(root: Element, localName: string) {
+  return descendantsByLocalName(root, localName)[0] ?? null;
+}
+
+function parseCoordinateList(text: string) {
+  return text
+    .trim()
+    .split(/\s+/)
+    .map((token) => token.split(",").map(Number))
+    .filter((tuple) => tuple.length >= 2 && Number.isFinite(tuple[0]) && Number.isFinite(tuple[1]));
+}
+
+function geometryFromKmlElement(element: Element): unknown | null {
+  if (element.localName === "Point") {
+    const coord = firstDescendant(element, "coordinates")?.textContent ?? "";
+    const tuples = parseCoordinateList(coord);
+    return tuples[0] ? { type: "Point", coordinates: tuples[0] } : null;
+  }
+  if (element.localName === "LineString") {
+    const coord = firstDescendant(element, "coordinates")?.textContent ?? "";
+    const tuples = parseCoordinateList(coord);
+    return tuples.length >= 2 ? { type: "LineString", coordinates: tuples } : null;
+  }
+  if (element.localName === "Polygon") {
+    const outer = descendantsByLocalName(element, "outerBoundaryIs")[0];
+    if (!outer) return null;
+    const outerCoords = parseCoordinateList(firstDescendant(outer, "coordinates")?.textContent ?? "");
+    if (outerCoords.length < 3) return null;
+    const innerCoords = descendantsByLocalName(element, "innerBoundaryIs")
+      .map((inner) => parseCoordinateList(firstDescendant(inner, "coordinates")?.textContent ?? ""))
+      .filter((ring) => ring.length >= 3);
+    return { type: "Polygon", coordinates: [outerCoords, ...innerCoords] };
+  }
+  return null;
+}
+
+function kmlToGeoJson(kmlText: string): ExternalCollection {
+  const doc = new DOMParser().parseFromString(kmlText, "application/xml");
+  if (doc.getElementsByTagName("parsererror").length) throw new Error("El KML no es XML válido.");
+
+  const features: ExternalFeature[] = [];
+  const placemarks = descendantsByLocalName(doc, "Placemark");
+  for (const placemark of placemarks) {
+    const name = firstDescendant(placemark, "name")?.textContent?.trim() || "Elemento externo";
+    const description = firstDescendant(placemark, "description")?.textContent?.trim() || "";
+    const geometryElements = Array.from(placemark.getElementsByTagName("*")).filter((element) =>
+      element.localName === "Point" || element.localName === "LineString" || element.localName === "Polygon",
+    );
+    for (const geometryElement of geometryElements) {
+      const geometry = geometryFromKmlElement(geometryElement);
+      if (!geometry) continue;
+      features.push({
+        type: "Feature",
+        geometry,
+        properties: { name, description, source: "KML_KMZ_TEMPORAL" },
+      });
+    }
+  }
+
+  if (!features.length) throw new Error("No se encontraron geometrías Point, LineString o Polygon utilizables.");
+  return { type: "FeatureCollection", features };
+}
+
 function RouteShield() {
   return (
     <div className="rn-shield" aria-label="Ruta Nacional 174">
@@ -261,12 +358,17 @@ export function Rn174Viewer() {
   const [autoRotate, setAutoRotate] = useState(false);
   const [bimResetNonce, setBimResetNonce] = useState(0);
   const [panelWidths, setPanelWidths] = useState<[number, number, number]>([34, 33, 33]);
+  const [layersPanelOpen, setLayersPanelOpen] = useState(true);
+  const [externalLayerInfo, setExternalLayerInfo] = useState<{ name: string; count: number } | null>(null);
+  const [externalLayerError, setExternalLayerError] = useState<string | null>(null);
 
   const mapNodeRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<LeafletMap | null>(null);
   const tileRef = useRef<TileLayer | null>(null);
   const assetLayerRef = useRef<LeafletGeoJSON | null>(null);
   const measureLayerRef = useRef<LeafletPolyline | null>(null);
+  const externalLayerRef = useRef<LeafletGeoJSON | null>(null);
+  const externalInputRef = useRef<HTMLInputElement | null>(null);
   const leafletRef = useRef<typeof import("leaflet") | null>(null);
   const didInitialFit = useRef(false);
 
@@ -440,6 +542,7 @@ export function Rn174Viewer() {
     if (!map || !L || !collection) return;
 
     assetLayerRef.current?.remove();
+    let selectedLeafletLayer: any = null;
     const layer = L.geoJSON(
       { type: "FeatureCollection", features: filteredFeatures } as never,
       {
@@ -468,16 +571,30 @@ export function Rn174Viewer() {
         },
         onEachFeature: (rawFeature, leafletLayer) => {
           const feature = rawFeature as AssetFeature;
-          leafletLayer.on("click", () => setSelectedId(String(feature.id ?? "")));
+          const id = String(feature.id ?? "");
           leafletLayer.bindTooltip(feature.properties.nombre ?? feature.properties.codigo ?? "Activo RN174", {
             sticky: true,
             direction: "top",
           });
+          leafletLayer.bindPopup(selectionPopupHtml(feature), {
+            className: "asset-callout",
+            closeButton: true,
+            autoPan: true,
+            maxWidth: 330,
+          });
+          leafletLayer.on("click", () => {
+            setSelectedId(id);
+            leafletLayer.openPopup();
+          });
+          if (id && id === selectedId) selectedLeafletLayer = leafletLayer;
         },
       },
     ).addTo(map);
 
     assetLayerRef.current = layer;
+    if (selectedLeafletLayer && !measureEnabled) {
+      window.setTimeout(() => selectedLeafletLayer?.openPopup(), 0);
+    }
     if (!didInitialFit.current) {
       const bounds = layer.getBounds();
       if (bounds.isValid()) {
@@ -485,7 +602,7 @@ export function Rn174Viewer() {
         didInitialFit.current = true;
       }
     }
-  }, [collection, filteredFeatures, selectedId]);
+  }, [collection, filteredFeatures, selectedId, measureEnabled]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -504,9 +621,7 @@ export function Rn174Viewer() {
       setMeasurePoints((current) => [...current, [event.latlng.lat, event.latlng.lng]]);
     };
     map.on("click", clickHandler);
-    return () => {
-      map.off("click", clickHandler);
-    };
+    return () => map.off("click", clickHandler);
   }, [measureEnabled]);
 
   useEffect(() => {
@@ -523,16 +638,14 @@ export function Rn174Viewer() {
     const line = L.polyline(latLngs, { color: "#ef4444", weight: 3, dashArray: "7 6" }).addTo(map);
     measureLayerRef.current = line;
     let total = 0;
-    for (let index = 1; index < latLngs.length; index += 1) {
-      total += latLngs[index - 1].distanceTo(latLngs[index]);
-    }
+    for (let index = 1; index < latLngs.length; index += 1) total += latLngs[index - 1].distanceTo(latLngs[index]);
     setMeasureDistance(total);
   }, [measurePoints]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => mapRef.current?.invalidateSize({ animate: false }), 30);
     return () => window.clearTimeout(timer);
-  }, [panelWidths]);
+  }, [panelWidths, layersPanelOpen]);
 
   const clearMeasure = useCallback(() => {
     measureLayerRef.current?.remove();
@@ -557,6 +670,66 @@ export function Rn174Viewer() {
     setPkTo("");
   }, []);
 
+  const clearExternalLayer = useCallback(() => {
+    const map = mapRef.current;
+    if (map && externalLayerRef.current) map.removeLayer(externalLayerRef.current);
+    externalLayerRef.current = null;
+    setExternalLayerInfo(null);
+    setExternalLayerError(null);
+    if (externalInputRef.current) externalInputRef.current.value = "";
+  }, []);
+
+  const loadExternalFile = async (file: File | null) => {
+    if (!file) return;
+    const map = mapRef.current;
+    const L = leafletRef.current;
+    if (!map || !L) return;
+    setExternalLayerError(null);
+    try {
+      let kmlText = "";
+      if (file.name.toLowerCase().endsWith(".kmz")) {
+        const JSZipModule = await import("jszip");
+        const zip = await JSZipModule.default.loadAsync(await file.arrayBuffer());
+        const entry = Object.values(zip.files).find((item) => !item.dir && item.name.toLowerCase().endsWith(".kml"));
+        if (!entry) throw new Error("El KMZ no contiene un archivo KML.");
+        kmlText = await entry.async("string");
+      } else if (file.name.toLowerCase().endsWith(".kml")) {
+        kmlText = await file.text();
+      } else {
+        throw new Error("Formato no admitido. Seleccione .kml o .kmz.");
+      }
+
+      const geojson = kmlToGeoJson(kmlText);
+      if (externalLayerRef.current) map.removeLayer(externalLayerRef.current);
+      const externalLayer = L.geoJSON(geojson as never, {
+        pointToLayer: (_feature, latlng) => L.circleMarker(latlng, {
+          radius: 6,
+          color: "#ffffff",
+          weight: 2,
+          fillColor: "#7c3aed",
+          fillOpacity: 0.95,
+        }),
+        style: () => ({
+          color: "#7c3aed",
+          fillColor: "#a78bfa",
+          fillOpacity: 0.22,
+          weight: 3,
+          opacity: 0.95,
+        }),
+        onEachFeature: (rawFeature: any, leafletLayer) => {
+          const name = String(rawFeature?.properties?.name ?? file.name);
+          leafletLayer.bindTooltip(`TEMP · ${name}`, { sticky: true, direction: "top" });
+        },
+      }).addTo(map);
+      externalLayerRef.current = externalLayer;
+      setExternalLayerInfo({ name: file.name, count: geojson.features.length });
+      const bounds = externalLayer.getBounds();
+      if (bounds.isValid()) map.fitBounds(bounds.pad(0.12), { maxZoom: 17 });
+    } catch (cause) {
+      setExternalLayerError(cause instanceof Error ? cause.message : "No se pudo leer el KML/KMZ.");
+    }
+  };
+
   const selectSearchResult = (feature: AssetFeature) => {
     setSelectedId(feature.id ?? null);
     setQuery("");
@@ -571,7 +744,6 @@ export function Rn174Viewer() {
     const startX = event.clientX;
     const start = [...panelWidths] as [number, number, number];
     document.body.classList.add("panel-resizing");
-
     const onMove = (moveEvent: PointerEvent) => {
       const delta = ((moveEvent.clientX - startX) / window.innerWidth) * 100;
       if (divider === 0) {
@@ -584,13 +756,11 @@ export function Rn174Viewer() {
         setPanelWidths([start[0], second, pair - second]);
       }
     };
-
     const onUp = () => {
       document.body.classList.remove("panel-resizing");
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
-
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp, { once: true });
   };
@@ -598,19 +768,13 @@ export function Rn174Viewer() {
   const downloadGeoJson = () => {
     if (!selectedFeature) return;
     const filename = safeName(selectedFeature.properties.codigo ?? selectedFeature.id ?? "RN174_activo");
-    downloadBlob(
-      new Blob([JSON.stringify(selectedFeature, null, 2)], { type: "application/geo+json" }),
-      `${filename}.geojson`,
-    );
+    downloadBlob(new Blob([JSON.stringify(selectedFeature, null, 2)], { type: "application/geo+json" }), `${filename}.geojson`);
   };
 
   const downloadKml = () => {
     if (!selectedFeature) return;
     const filename = safeName(selectedFeature.properties.codigo ?? selectedFeature.id ?? "RN174_activo");
-    downloadBlob(
-      new Blob([featureToKml(selectedFeature)], { type: "application/vnd.google-earth.kml+xml;charset=utf-8" }),
-      `${filename}.kml`,
-    );
+    downloadBlob(new Blob([featureToKml(selectedFeature)], { type: "application/vnd.google-earth.kml+xml;charset=utf-8" }), `${filename}.kml`);
   };
 
   const downloadKmz = async () => {
@@ -657,16 +821,9 @@ export function Rn174Viewer() {
     const ficha = XLSX.utils.json_to_sheet([row]);
     ficha["!cols"] = Object.keys(row).map((key) => ({ wch: Math.max(15, key.length + 2) }));
     XLSX.utils.book_append_sheet(wb, ficha, "Ficha activo");
-
-    const geom = XLSX.utils.json_to_sheet([
-      {
-        tipo_geometria: selectedFeature.geometry.type,
-        geojson: JSON.stringify(selectedFeature.geometry),
-      },
-    ]);
+    const geom = XLSX.utils.json_to_sheet([{ tipo_geometria: selectedFeature.geometry.type, geojson: JSON.stringify(selectedFeature.geometry) }]);
     geom["!cols"] = [{ wch: 22 }, { wch: 100 }];
     XLSX.utils.book_append_sheet(wb, geom, "Geometria");
-
     XLSX.writeFile(wb, `${filename}_ficha.xlsx`);
   };
 
@@ -674,14 +831,12 @@ export function Rn174Viewer() {
     let disposed = false;
     let animationFrame = 0;
     let resizeObserver: ResizeObserver | null = null;
-
     async function buildBridgeScene() {
       const node = threeNodeRef.current;
       if (!node) return;
       const THREE = await import("three");
       const { OrbitControls } = await import("three/examples/jsm/controls/OrbitControls.js");
       if (disposed || !threeNodeRef.current) return;
-
       node.replaceChildren();
       const scene = new THREE.Scene();
       scene.background = new THREE.Color(0xeef3f8);
@@ -690,42 +845,34 @@ export function Rn174Viewer() {
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.shadowMap.enabled = true;
       node.appendChild(renderer.domElement);
-
       const controls = new OrbitControls(camera, renderer.domElement);
       controls.enableDamping = true;
       controls.dampingFactor = 0.08;
       controls.autoRotate = autoRotate;
       controls.autoRotateSpeed = 0.7;
       controls.target.set(0, 18, 0);
-
       scene.add(new THREE.HemisphereLight(0xffffff, 0x7b8794, 2.2));
       const sun = new THREE.DirectionalLight(0xffffff, 2.3);
       sun.position.set(220, 340, 180);
       sun.castShadow = true;
       scene.add(sun);
-
       const group = new THREE.Group();
       group.name = "RN174_PUENTE_PRINCIPAL_IFC4X3_PRELIMINAR";
       scene.add(group);
-
       const concrete = new THREE.MeshStandardMaterial({ color: 0xd6dce4, roughness: 0.72, metalness: 0.04 });
       const deckMaterial = new THREE.MeshStandardMaterial({ color: 0x44566c, roughness: 0.64, metalness: 0.13 });
       const cableMaterial = new THREE.LineBasicMaterial({ color: 0x8293a7 });
       const barrierMaterial = new THREE.MeshStandardMaterial({ color: 0xf2f4f6, roughness: 0.8 });
-
       const deck = new THREE.Mesh(new THREE.BoxGeometry(608, 3, 22.8), deckMaterial);
-      deck.position.set(0, 0, 0);
       deck.receiveShadow = true;
       deck.castShadow = true;
       group.add(deck);
-
       for (const z of [-10.9, 0, 10.9]) {
         const barrier = new THREE.Mesh(new THREE.BoxGeometry(608, 1.1, 0.55), barrierMaterial);
         barrier.position.set(0, 2.05, z);
         barrier.castShadow = true;
         group.add(barrier);
       }
-
       const createPier = (x: number, height: number, width: number, depth: number) => {
         const pier = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), concrete);
         pier.position.set(x, -height / 2 + 0.5, 0);
@@ -733,10 +880,8 @@ export function Rn174Viewer() {
         pier.receiveShadow = true;
         group.add(pier);
       };
-
       createPier(-295, 52, 8, 14);
       createPier(295, 52, 8, 14);
-
       for (const x of [-175, 175]) {
         for (const z of [-7, 7]) {
           const leg = new THREE.Mesh(new THREE.BoxGeometry(5, 126, 4), concrete);
@@ -749,13 +894,11 @@ export function Rn174Viewer() {
         topBeam.castShadow = true;
         group.add(topBeam);
       }
-
       const addCable = (xTower: number, z: number, xDeck: number) => {
         const points = [new THREE.Vector3(xTower, 72, z), new THREE.Vector3(xDeck, 2.2, z)];
         const geometry = new THREE.BufferGeometry().setFromPoints(points);
         group.add(new THREE.Line(geometry, cableMaterial));
       };
-
       const stayOffsets = [22, 42, 62, 82, 102, 122, 142, 158];
       for (const z of [-8.6, 8.6]) {
         for (const d of stayOffsets) {
@@ -765,18 +908,15 @@ export function Rn174Viewer() {
           addCable(175, z, Math.min(304, 175 + d));
         }
       }
-
       const grid = new THREE.GridHelper(850, 34, 0x9aa9b9, 0xc6d0da);
       grid.position.y = -54;
       scene.add(grid);
-
       if (bimView === "PLANTA") camera.position.set(0, 650, 0.1);
       else if (bimView === "ALZADO") camera.position.set(0, 70, 650);
       else camera.position.set(410, 175, 390);
       camera.lookAt(0, 18, 0);
       controls.target.set(0, 18, 0);
       controls.update();
-
       const resize = () => {
         const width = node.clientWidth;
         const height = node.clientHeight;
@@ -788,7 +928,6 @@ export function Rn174Viewer() {
       resize();
       resizeObserver = new ResizeObserver(resize);
       resizeObserver.observe(node);
-
       const animate = () => {
         controls.autoRotate = autoRotate;
         controls.update();
@@ -796,13 +935,11 @@ export function Rn174Viewer() {
         animationFrame = requestAnimationFrame(animate);
       };
       animate();
-
       threeSceneRef.current = scene;
       threeCameraRef.current = camera;
       threeRendererRef.current = renderer;
       threeControlsRef.current = controls;
     }
-
     void buildBridgeScene();
     return () => {
       disposed = true;
@@ -830,180 +967,65 @@ export function Rn174Viewer() {
     <main className="cde-shell">
       <style>{`
         .cde-shell{grid-template-rows:64px 32px minmax(0,1fr) 88px!important}
-        .cde-topbar{font-size:13px!important}
-        .cde-brand-line strong{font-size:16px!important}.cde-brand-line span{font-size:13px!important}.cde-brand small{font-size:11px!important}
-        .global-search-wrap{height:39px!important}.global-search-wrap input{font-size:13px!important}
-        .global-search-results button span{font-size:11px!important}.global-search-results button strong{font-size:12px!important}.global-search-results button small{font-size:10.5px!important}
+        .cde-topbar{font-size:13px!important}.cde-brand-line strong{font-size:16px!important}.cde-brand-line span{font-size:13px!important}.cde-brand small{font-size:11px!important}
+        .global-search-wrap{height:39px!important}.global-search-wrap input{font-size:13px!important}.global-search-results button span{font-size:11px!important}.global-search-results button strong{font-size:12px!important}.global-search-results button small{font-size:10.5px!important}
         .sync-badge{font-size:11px!important}.preliminary-strip,.preliminary-strip strong{font-size:10.5px!important}
-        .panel-titlebar{height:40px!important;font-size:11.5px!important}.panel-titlebar strong{font-size:12.5px!important}.panel-titlebar span{font-size:11px!important}.panel-titlebar small{font-size:10px!important}
-        .work-panel{grid-template-rows:40px minmax(0,1fr)!important;border-right:0!important}
-        .gis-tools-card{width:276px!important}.tools-heading{font-size:12px!important}.layer-toggle{min-height:30px!important;font-size:10.5px!important}.layer-toggle b{font-size:10px!important}
-        .filter-block label>span{font-size:9.5px!important}.filter-block select,.filter-block input{height:31px!important;font-size:10.5px!important}
-        .gis-tool-buttons button{font-size:9.5px!important;padding:7px 4px!important}.measure-readout{font-size:10px!important}.measure-readout button{font-size:9px!important}
-        .map-switcher button{font-size:10px!important}.map-hint{font-size:9.5px!important}
-        .gis-selection-card{width:310px!important}.selection-card-top strong{font-size:11px!important}.selection-card-top span{font-size:10.5px!important}.gis-selection-card h3{font-size:13px!important}.gis-selection-card dt{font-size:9.5px!important}.gis-selection-card dd{font-size:10px!important}.selection-sync{font-size:9.5px!important}
-        .bim-model-badge strong{font-size:10.5px!important}.bim-model-badge span{font-size:9.5px!important}.bim-provenance{font-size:9.5px!important}.bim-provenance strong{font-size:10.5px!important}
-        .bim-actions button,.bim-actions a{height:31px!important;font-size:9.5px!important}.bim-toolbar button{font-size:9.5px!important}
-        .tree-heading{font-size:11px!important}.tree-node{min-height:31px!important;font-size:9.8px!important}.tree-node em{font-size:9px!important}
-        .doc-inspector-head{font-size:11px!important}.doc-inspector table{font-size:10px!important}.doc-inspector th,.doc-inspector td{padding:5px 7px!important}
-        .doc-note,.bridge-document-card{font-size:10px!important}
-        .asset-dock{font-size:10.5px!important}.dock-identity strong{font-size:12px!important}.dock-field span{font-size:9px!important}.dock-field b{font-size:10.5px!important}.dock-field small{font-size:9.5px!important}
-        .panel-resizer{position:relative;z-index:1500;cursor:col-resize;background:#d6dee8;box-shadow:inset 1px 0 #fff,inset -1px 0 #fff;touch-action:none}
-        .panel-resizer::after{content:"⋮";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:18px;height:44px;display:grid;place-items:center;color:#64748b;background:#f8fafc;border:1px solid #cbd5e1;border-radius:10px;font-size:24px;line-height:1}
-        .panel-resizer:hover,.panel-resizing .panel-resizer{background:#0b7acb}.panel-resizing{cursor:col-resize!important;user-select:none!important}
-        .download-group{display:flex;align-items:center;gap:5px;flex-wrap:wrap}.download-group button{display:inline-flex;align-items:center;gap:4px;padding:7px 9px;border:1px solid #cbd5e1;border-radius:5px;background:#fff;color:#334155;font-size:10px;font-weight:750;cursor:pointer}
-        .download-group button:hover{background:#0b7acb;color:#fff;border-color:#0b7acb}.download-group button:disabled{opacity:.45;cursor:not-allowed}
-        .asset-dock .download-group{justify-content:flex-end}.asset-dock .download-group button{padding:8px 10px}
+        .panel-titlebar{height:40px!important;font-size:11.5px!important}.panel-titlebar strong{font-size:12.5px!important}.panel-titlebar span{font-size:11px!important}.panel-titlebar small{font-size:10px!important}.work-panel{grid-template-rows:40px minmax(0,1fr)!important;border-right:0!important}
+        .gis-tools-card{width:276px!important}.tools-heading{font-size:12px!important;justify-content:space-between}.tools-heading-main{display:flex;align-items:center;gap:6px}.tools-close{display:grid;place-items:center;width:25px;height:25px;padding:0;border:1px solid #d7e1eb;border-radius:4px;background:#fff;cursor:pointer}.tools-close:hover{background:#eff6ff;color:#0b7acb}
+        .layer-toggle{min-height:30px!important;font-size:10.5px!important}.layer-toggle b{font-size:10px!important}.filter-block label>span{font-size:9.5px!important}.filter-block select,.filter-block input{height:31px!important;font-size:10.5px!important}.gis-tool-buttons button{font-size:9.5px!important;padding:7px 4px!important}.measure-readout{font-size:10px!important}.measure-readout button{font-size:9px!important}
+        .map-switcher button{font-size:10px!important}.map-hint{font-size:9.5px!important}.layers-open-button{position:absolute;z-index:650;top:10px;left:10px;display:flex;align-items:center;gap:6px;padding:8px 10px;color:#17324d;background:rgba(255,255,255,.96);border:1px solid #cbd7e5;border-radius:6px;box-shadow:0 5px 18px rgba(15,23,42,.18);font-size:10.5px;font-weight:800;cursor:pointer}.layers-open-button:hover{color:#fff;background:#0b7acb;border-color:#0b7acb}
+        .external-file-box{margin-top:8px;padding-top:8px;border-top:1px solid #dfe6ee}.external-load-button{width:100%;display:flex;align-items:center;justify-content:center;gap:6px;padding:7px 8px;color:#5b21b6;background:#f5f3ff;border:1px solid #ddd6fe;border-radius:5px;font-size:9.5px;font-weight:800;cursor:pointer}.external-load-button:hover{color:#fff;background:#7c3aed;border-color:#7c3aed}.external-layer-status{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;align-items:center;margin-top:6px;padding:6px 7px;background:#faf5ff;border:1px solid #e9d5ff;border-radius:4px}.external-layer-status div{min-width:0}.external-layer-status strong{display:block;overflow:hidden;color:#6d28d9;font-size:9px;text-overflow:ellipsis;white-space:nowrap}.external-layer-status span{display:block;color:#7c6f91;font-size:8px}.external-layer-status button{display:grid;place-items:center;width:23px;height:23px;padding:0;color:#7c3aed;background:#fff;border:1px solid #ddd6fe;border-radius:4px;cursor:pointer}.external-error{margin-top:5px;color:#991b1b;font-size:8.5px;line-height:1.25}
+        .asset-callout .leaflet-popup-content-wrapper{padding:0;border-radius:7px;box-shadow:0 9px 26px rgba(15,23,42,.28)}.asset-callout .leaflet-popup-content{width:270px!important;margin:0!important}.asset-callout .leaflet-popup-tip{box-shadow:3px 3px 8px rgba(15,23,42,.12)}.asset-callout-card{padding:11px 12px;background:#fff;border-left:4px solid #0b7acb;border-radius:7px}.asset-callout-top{display:flex;align-items:center;justify-content:space-between;gap:12px}.asset-callout-top strong{color:#0b7acb;font-size:11px}.asset-callout-top span{color:#475569;font-size:10.5px;font-weight:800}.asset-callout-card h3{margin:6px 0 8px;color:#172033;font-size:13px;line-height:1.25}.asset-callout-family{display:grid;grid-template-columns:62px minmax(0,1fr);gap:8px;padding-top:6px;border-top:1px solid #edf1f5}.asset-callout-family span{color:#64748b;font-size:9.5px}.asset-callout-family b{overflow:hidden;color:#24364d;font-size:10px;text-overflow:ellipsis;white-space:nowrap}
+        .bim-model-badge strong{font-size:10.5px!important}.bim-model-badge span{font-size:9.5px!important}.bim-provenance{font-size:9.5px!important}.bim-provenance strong{font-size:10.5px!important}.bim-actions button,.bim-actions a{height:31px!important;font-size:9.5px!important}.bim-toolbar button{font-size:9.5px!important}.tree-heading{font-size:11px!important}.tree-node{min-height:31px!important;font-size:9.8px!important}.tree-node em{font-size:9px!important}.doc-inspector-head{font-size:11px!important}.doc-inspector table{font-size:10px!important}.doc-inspector th,.doc-inspector td{padding:5px 7px!important}.doc-note,.bridge-document-card{font-size:10px!important}
+        .asset-dock{font-size:10.5px!important}.dock-identity strong{font-size:12px!important}.dock-field span{font-size:9px!important}.dock-field b{font-size:10.5px!important}.dock-field small{font-size:9.5px!important}.panel-resizer{position:relative;z-index:1500;cursor:col-resize;background:#d6dee8;box-shadow:inset 1px 0 #fff,inset -1px 0 #fff;touch-action:none}.panel-resizer::after{content:"⋮";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:18px;height:44px;display:grid;place-items:center;color:#64748b;background:#f8fafc;border:1px solid #cbd5e1;border-radius:10px;font-size:24px;line-height:1}.panel-resizer:hover,.panel-resizing .panel-resizer{background:#0b7acb}.panel-resizing{cursor:col-resize!important;user-select:none!important}
+        .download-group{display:flex;align-items:center;gap:5px;flex-wrap:wrap}.download-group button{display:inline-flex;align-items:center;gap:4px;padding:7px 9px;border:1px solid #cbd5e1;border-radius:5px;background:#fff;color:#334155;font-size:10px;font-weight:750;cursor:pointer}.download-group button:hover{background:#0b7acb;color:#fff;border-color:#0b7acb}.download-group button:disabled{opacity:.45;cursor:not-allowed}.asset-dock .download-group{justify-content:flex-end}.asset-dock .download-group button{padding:8px 10px}
         @media(max-width:1180px){.gis-tools-card{width:250px!important}.asset-dock .dock-field:nth-of-type(3){display:none}}
       `}</style>
 
       <header className="cde-topbar">
-        <div className="cde-brand">
-          <RouteShield />
-          <div>
-            <div className="cde-brand-line">
-              <strong>RN0174</strong>
-              <span>Conexión Rosario - Victoria</span>
-            </div>
-            <small>Gestión sincronizada GIS ↔ IFC4.3 ↔ CDE · Estado 0 V3.2</small>
-          </div>
-        </div>
-
+        <div className="cde-brand"><RouteShield /><div><div className="cde-brand-line"><strong>RN0174</strong><span>Conexión Rosario - Victoria</span></div><small>Gestión sincronizada GIS ↔ IFC4.3 ↔ CDE · Estado 0 V3.2</small></div></div>
         <div className="global-search-wrap">
           <Search size={17} />
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && searchResults[0]) selectSearchResult(searchResults[0]);
-            }}
-            placeholder="Buscar asset_id, código, nombre, PK, tipo, lote..."
-          />
-          {query && (
-            <button className="search-clear" type="button" onClick={() => setQuery("")} aria-label="Limpiar búsqueda"><X size={15} /></button>
-          )}
-          {query && (
-            <div className="global-search-results">
-              {searchResults.length ? searchResults.map((feature) => (
-                <button key={feature.id} type="button" onClick={() => selectSearchResult(feature)}>
-                  <span>{feature.properties.codigo ?? feature.id}</span>
-                  <strong>{feature.properties.nombre ?? feature.properties.tipo_activo ?? "Activo RN174"}</strong>
-                  <small>{formatPk(feature.properties.progresiva_inicio_m ?? feature.properties.progresiva_m, feature.properties.progresiva)}</small>
-                </button>
-              )) : <div className="search-empty">Sin coincidencias</div>}
-            </div>
-          )}
+          <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && searchResults[0]) selectSearchResult(searchResults[0]); }} placeholder="Buscar asset_id, código, nombre, PK, tipo, lote..." />
+          {query && <button className="search-clear" type="button" onClick={() => setQuery("")} aria-label="Limpiar búsqueda"><X size={15} /></button>}
+          {query && <div className="global-search-results">{searchResults.length ? searchResults.map((feature) => <button key={feature.id} type="button" onClick={() => selectSearchResult(feature)}><span>{feature.properties.codigo ?? feature.id}</span><strong>{feature.properties.nombre ?? feature.properties.tipo_activo ?? "Activo RN174"}</strong><small>{formatPk(feature.properties.progresiva_inicio_m ?? feature.properties.progresiva_m, feature.properties.progresiva)}</small></button>) : <div className="search-empty">Sin coincidencias</div>}</div>}
         </div>
-
-        <div className="cde-status-zone">
-          <div className="sync-badge"><Database size={15} /> Supabase V3.2 · {datasetTotal}</div>
-          <button className="refresh-button" type="button" onClick={() => void loadAssets()} title="Actualizar inventario">
-            <RefreshCw size={16} className={loading ? "spin" : ""} />
-          </button>
-        </div>
+        <div className="cde-status-zone"><div className="sync-badge"><Database size={15} /> Supabase V3.2 · {datasetTotal}</div><button className="refresh-button" type="button" onClick={() => void loadAssets()} title="Actualizar inventario"><RefreshCw size={16} className={loading ? "spin" : ""} /></button></div>
       </header>
 
-      <div className="preliminary-strip">
-        <AlertTriangle size={14} />
-        <strong>PUBLICACIÓN ABIERTA TEMPORAL:</strong>
-        <span>se muestran datos BORRADOR / EN REVISIÓN / APROBADOS. Visible no significa validado.</span>
-      </div>
+      <div className="preliminary-strip"><AlertTriangle size={14} /><strong>PUBLICACIÓN ABIERTA TEMPORAL:</strong><span>se muestran datos BORRADOR / EN REVISIÓN / APROBADOS. Visible no significa validado.</span></div>
 
-      <section
-        className="cde-workspace"
-        style={{
-          gridTemplateColumns: `${panelWidths[0]}fr 8px ${panelWidths[1]}fr 8px ${panelWidths[2]}fr`,
-        }}
-      >
+      <section className="cde-workspace" style={{ gridTemplateColumns: `${panelWidths[0]}fr 8px ${panelWidths[1]}fr 8px ${panelWidths[2]}fr` }}>
         <article className="work-panel gis-panel">
-          <div className="panel-titlebar">
-            <div><MapIcon size={17} /><strong>1. PANTALLA GIS</strong><span>Inventario georreferenciado</span></div>
-            <small>{visibleTotal} visibles / {datasetTotal} total</small>
-          </div>
+          <div className="panel-titlebar"><div><MapIcon size={17} /><strong>1. PANTALLA GIS</strong><span>Inventario georreferenciado</span></div><small>{visibleTotal} visibles / {datasetTotal} total</small></div>
           <div className="panel-body map-body">
             <div ref={mapNodeRef} className={`gis-map ${measureEnabled ? "measure-mode" : ""}`} />
 
-            <div className="gis-tools-card">
-              <div className="tools-heading"><Layers3 size={16} /><strong>Capas y filtros RN174</strong></div>
-              {(["PUNTO", "LINEA", "POLIGONO"] as GeometryClass[]).map((geometry) => (
-                <label key={geometry} className="layer-toggle">
-                  <input
-                    type="checkbox"
-                    checked={layerVisibility[geometry]}
-                    onChange={() => setLayerVisibility((current) => ({ ...current, [geometry]: !current[geometry] }))}
-                  />
-                  <i style={{ background: GEOMETRY_COLORS[geometry] }} />
-                  <span>{geometry === "PUNTO" ? "Puntos" : geometry === "LINEA" ? "Líneas" : "Superficies"}</span>
-                  <b>{counts.visible[geometry]} / {counts.total[geometry]}</b>
-                </label>
-              ))}
+            {layersPanelOpen ? (
+              <div className="gis-tools-card">
+                <div className="tools-heading"><div className="tools-heading-main"><Layers3 size={16} /><strong>Capas y filtros RN174</strong></div><button className="tools-close" type="button" onClick={() => setLayersPanelOpen(false)} title="Ocultar panel"><X size={14} /></button></div>
+                {(["PUNTO", "LINEA", "POLIGONO"] as GeometryClass[]).map((geometry) => (
+                  <label key={geometry} className="layer-toggle"><input type="checkbox" checked={layerVisibility[geometry]} onChange={() => setLayerVisibility((current) => ({ ...current, [geometry]: !current[geometry] }))} /><i style={{ background: GEOMETRY_COLORS[geometry] }} /><span>{geometry === "PUNTO" ? "Puntos" : geometry === "LINEA" ? "Líneas" : "Superficies"}</span><b>{counts.visible[geometry]} / {counts.total[geometry]}</b></label>
+                ))}
+                <div className="filter-block">
+                  <label><span>Tipo de activo</span><select value={filterType} onChange={(event) => setFilterType(event.target.value)}><option value="TODOS">Todos</option>{assetTypes.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
+                  <label><span>Estado validación</span><select value={filterState} onChange={(event) => setFilterState(event.target.value)}><option value="TODOS">Todos</option>{validationStates.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
+                  <div className="pk-filter-row"><label><span>PK desde [m]</span><input value={pkFrom} onChange={(event) => setPkFrom(event.target.value)} inputMode="decimal" placeholder="0" /></label><label><span>PK hasta [m]</span><input value={pkTo} onChange={(event) => setPkTo(event.target.value)} inputMode="decimal" placeholder="60000" /></label></div>
+                </div>
+                <div className="gis-tool-buttons"><button type="button" onClick={fitVisible}><Maximize2 size={14} /> Encuadrar</button><button type="button" className={measureEnabled ? "active" : ""} onClick={() => { setMeasureEnabled((value) => !value); if (measureEnabled) clearMeasure(); }}><Ruler size={14} /> Medir</button><button type="button" onClick={resetFilters}><Filter size={14} /> Limpiar</button></div>
+                {measureEnabled && <div className="measure-readout"><Ruler size={14} /><span>{measurePoints.length < 2 ? "Haga clic en 2 o más puntos" : measureDistance >= 1000 ? `${(measureDistance / 1000).toFixed(3)} km` : `${measureDistance.toFixed(1)} m`}</span><button type="button" onClick={clearMeasure}>Borrar</button></div>}
 
-              <div className="filter-block">
-                <label><span>Tipo de activo</span>
-                  <select value={filterType} onChange={(event) => setFilterType(event.target.value)}>
-                    <option value="TODOS">Todos</option>
-                    {assetTypes.map((value) => <option key={value} value={value}>{value}</option>)}
-                  </select>
-                </label>
-                <label><span>Estado validación</span>
-                  <select value={filterState} onChange={(event) => setFilterState(event.target.value)}>
-                    <option value="TODOS">Todos</option>
-                    {validationStates.map((value) => <option key={value} value={value}>{value}</option>)}
-                  </select>
-                </label>
-                <div className="pk-filter-row">
-                  <label><span>PK desde [m]</span><input value={pkFrom} onChange={(event) => setPkFrom(event.target.value)} inputMode="decimal" placeholder="0" /></label>
-                  <label><span>PK hasta [m]</span><input value={pkTo} onChange={(event) => setPkTo(event.target.value)} inputMode="decimal" placeholder="60000" /></label>
+                <div className="external-file-box">
+                  <input ref={externalInputRef} type="file" accept=".kml,.kmz,application/vnd.google-earth.kml+xml,application/vnd.google-earth.kmz" hidden onChange={(event) => void loadExternalFile(event.target.files?.[0] ?? null)} />
+                  <button className="external-load-button" type="button" onClick={() => externalInputRef.current?.click()}><Upload size={14} /> Cargar KML/KMZ temporal</button>
+                  {externalLayerInfo && <div className="external-layer-status"><div><strong>{externalLayerInfo.name}</strong><span>{externalLayerInfo.count} geometrías · TEMPORAL · no se guarda</span></div><button type="button" onClick={clearExternalLayer} title="Quitar capa temporal"><X size={13} /></button></div>}
+                  {externalLayerError && <div className="external-error">{externalLayerError}</div>}
                 </div>
               </div>
+            ) : <button className="layers-open-button" type="button" onClick={() => setLayersPanelOpen(true)}><Layers3 size={15} /> Capas y filtros</button>}
 
-              <div className="gis-tool-buttons">
-                <button type="button" onClick={fitVisible}><Maximize2 size={14} /> Encuadrar</button>
-                <button
-                  type="button"
-                  className={measureEnabled ? "active" : ""}
-                  onClick={() => {
-                    setMeasureEnabled((value) => !value);
-                    if (measureEnabled) clearMeasure();
-                  }}
-                ><Ruler size={14} /> Medir</button>
-                <button type="button" onClick={resetFilters}><Filter size={14} /> Limpiar</button>
-              </div>
-
-              {measureEnabled && (
-                <div className="measure-readout">
-                  <Ruler size={14} />
-                  <span>{measurePoints.length < 2 ? "Haga clic en 2 o más puntos" : measureDistance >= 1000 ? `${(measureDistance / 1000).toFixed(3)} km` : `${measureDistance.toFixed(1)} m`}</span>
-                  <button type="button" onClick={clearMeasure}>Borrar</button>
-                </div>
-              )}
-            </div>
-
-            <div className="map-switcher">
-              {(Object.keys(BASEMAPS) as BaseMapKey[]).map((key) => (
-                <button key={key} type="button" className={baseMap === key ? "active" : ""} onClick={() => setBaseMap(key)}>{BASEMAPS[key].name}</button>
-              ))}
-            </div>
-
+            <div className="map-switcher">{(Object.keys(BASEMAPS) as BaseMapKey[]).map((key) => <button key={key} type="button" className={baseMap === key ? "active" : ""} onClick={() => setBaseMap(key)}>{BASEMAPS[key].name}</button>)}</div>
             <div className="map-hint"><MousePointer2 size={13} /> clic en un activo = consulta sincronizada</div>
-
-            {selectedFeature && (
-              <div className="gis-selection-card">
-                <div className="selection-card-top">
-                  <strong>{display(p?.codigo, selectedAssetId)}</strong>
-                  <span>{selectedPk}</span>
-                </div>
-                <h3>{display(p?.nombre, selectedType)}</h3>
-                <dl>
-                  <div><dt>Familia</dt><dd>{display(p?.familia)}</dd></div>
-                  <div><dt>Estado</dt><dd className={p?.estado_validacion === "APROBADO" ? "status-approved" : "status-preliminary"}>{display(p?.estado_validacion)}</dd></div>
-                  <div><dt>Fuente</dt><dd>{display(p?.lote_origen)}</dd></div>
-                  <div><dt>Geometría</dt><dd>{selectedGeometry}</dd></div>
-                </dl>
-                <div className="selection-sync">Activo seleccionado para GIS · BIM · CDE <ChevronRight size={15} /></div>
-              </div>
-            )}
-
             {error && <div className="map-error">{error}</div>}
           </div>
         </article>
@@ -1011,119 +1033,41 @@ export function Rn174Viewer() {
         <div className="panel-resizer" title="Arrastrar para cambiar ancho" onPointerDown={(event) => startResize(0, event)} />
 
         <article className="work-panel bim-panel">
-          <div className="panel-titlebar">
-            <div><Box size={17} /><strong>2. PANTALLA IFC 3D</strong><span>Puente Principal · IFC4.3</span></div>
-            <small>{bridgeSelected ? "GIS vinculado" : "modelo maestro"}</small>
-          </div>
+          <div className="panel-titlebar"><div><Box size={17} /><strong>2. PANTALLA IFC 3D</strong><span>Puente Principal · IFC4.3</span></div><small>{bridgeSelected ? "GIS vinculado" : "modelo maestro"}</small></div>
           <div className="panel-body bim-stage">
             <div ref={threeNodeRef} className="three-viewport" />
-
-            <div className="bim-model-badge">
-              <div><Box size={17} /><strong>RN174-P-PUENTE-PRINCIPAL</strong></div>
-              <span>IFC4X3_ADD2 · PRELIMINAR_NO_VALIDADO</span>
-            </div>
-
-            <div className="bim-provenance">
-              <strong>Modelo derivado de documentación conforme a obra</strong>
-              <span>PK 1+647.60 → 2+255.60 · L=608 m · B=22.80 m · luz principal 350 m</span>
-              <span>Geometría vertical/obenques: preliminar; falta conciliación completa de Unidad P (419 DWG).</span>
-            </div>
-
-            <div className="bim-actions">
-              <button type="button" onClick={() => setAutoRotate((value) => !value)} className={autoRotate ? "active" : ""}><RotateCcw size={14} /> Rotar</button>
-              <button type="button" onClick={() => setBimResetNonce((value) => value + 1)}><Crosshair size={14} /> Centrar</button>
-              <button type="button" onClick={selectBridge} disabled={!bridgeFeature}><Eye size={14} /> Ver en GIS</button>
-              <a href={IFC_URL} download><Download size={14} /> IFC 4.3</a>
-            </div>
-
-            <div className="bim-toolbar">
-              {(["3D", "PLANTA", "ALZADO"] as BimView[]).map((value) => (
-                <button key={value} type="button" className={bimView === value ? "active" : ""} onClick={() => setBimView(value)}>{value}</button>
-              ))}
-            </div>
+            <div className="bim-model-badge"><div><Box size={17} /><strong>RN174-P-PUENTE-PRINCIPAL</strong></div><span>IFC4X3_ADD2 · PRELIMINAR_NO_VALIDADO</span></div>
+            <div className="bim-provenance"><strong>Modelo derivado de documentación conforme a obra</strong><span>PK 1+647.60 → 2+255.60 · L=608 m · B=22.80 m · luz principal 350 m</span><span>Geometría vertical/obenques: preliminar; falta conciliación completa de Unidad P (419 DWG).</span></div>
+            <div className="bim-actions"><button type="button" onClick={() => setAutoRotate((value) => !value)} className={autoRotate ? "active" : ""}><RotateCcw size={14} /> Rotar</button><button type="button" onClick={() => setBimResetNonce((value) => value + 1)}><Crosshair size={14} /> Centrar</button><button type="button" onClick={selectBridge} disabled={!bridgeFeature}><Eye size={14} /> Ver en GIS</button><a href={IFC_URL} download><Download size={14} /> IFC 4.3</a></div>
+            <div className="bim-toolbar">{(["3D", "PLANTA", "ALZADO"] as BimView[]).map((value) => <button key={value} type="button" className={bimView === value ? "active" : ""} onClick={() => setBimView(value)}>{value}</button>)}</div>
           </div>
         </article>
 
         <div className="panel-resizer" title="Arrastrar para cambiar ancho" onPointerDown={(event) => startResize(1, event)} />
 
         <article className="work-panel docs-panel">
-          <div className="panel-titlebar cde-titlebar">
-            <div><Folder size={17} /><strong>3. PANTALLA CDE</strong><span>Árbol documental</span></div>
-            <small>CDE · trazabilidad</small>
-          </div>
+          <div className="panel-titlebar cde-titlebar"><div><Folder size={17} /><strong>3. PANTALLA CDE</strong><span>Árbol documental</span></div><small>CDE · trazabilidad</small></div>
           <div className="panel-body docs-body">
-            <section className="tree-card">
-              <div className="tree-heading"><Folder size={16} /><strong>CDE_RN174_MASTER</strong></div>
-              <div className="tree-node level-1 open"><ChevronRight size={14} /><Folder size={15} /><span>01_MODELOS_BIM</span><em>1 modelo</em></div>
-              <a className="tree-node level-2 active" href={IFC_URL} download><Box size={15} /><span>RN174_PUENTE_PRINCIPAL_IFC4X3_PRELIMINAR.ifc</span><em>IFC4.3</em></a>
-              <div className="tree-node level-1"><ChevronRight size={14} /><Folder size={15} /><span>02_PROYECTO_Y_CONFORME_A_OBRA</span><em>catalogado</em></div>
-              <div className="tree-node level-1 open"><ChevronRight size={14} /><Folder size={15} /><span>03_FUENTES_E_INVENTARIOS</span></div>
-              <div className="tree-node level-2 active"><FileText size={15} /><span>{display(p?.lote_origen, "Sin lote documental")}</span><em>fuente GIS</em></div>
-              <div className="tree-node level-1 open"><ChevronRight size={14} /><Folder size={15} /><span>04_ACTIVOS_RN174</span></div>
-              <div className="tree-node level-2 active"><CircleDot size={15} /><span>{selectedAssetId}</span><em>{selectedType}</em></div>
-            </section>
+            <section className="tree-card"><div className="tree-heading"><Folder size={16} /><strong>CDE_RN174_MASTER</strong></div><div className="tree-node level-1 open"><ChevronRight size={14} /><Folder size={15} /><span>01_MODELOS_BIM</span><em>1 modelo</em></div><a className="tree-node level-2 active" href={IFC_URL} download><Box size={15} /><span>RN174_PUENTE_PRINCIPAL_IFC4X3_PRELIMINAR.ifc</span><em>IFC4.3</em></a><div className="tree-node level-1"><ChevronRight size={14} /><Folder size={15} /><span>02_PROYECTO_Y_CONFORME_A_OBRA</span><em>catalogado</em></div><div className="tree-node level-1 open"><ChevronRight size={14} /><Folder size={15} /><span>03_FUENTES_E_INVENTARIOS</span></div><div className="tree-node level-2 active"><FileText size={15} /><span>{display(p?.lote_origen, "Sin lote documental")}</span><em>fuente GIS</em></div><div className="tree-node level-1 open"><ChevronRight size={14} /><Folder size={15} /><span>04_ACTIVOS_RN174</span></div><div className="tree-node level-2 active"><CircleDot size={15} /><span>{selectedAssetId}</span><em>{selectedType}</em></div></section>
 
             <section className="doc-inspector">
-              <div className="doc-inspector-head">
-                <div><FileText size={16} /><strong>FICHA DEL ACTIVO · V3.2</strong></div>
-                <span className={p?.estado_validacion === "APROBADO" ? "published-pill" : "preliminary-pill"}>{display(p?.estado_validacion, "SIN ESTADO")}</span>
-              </div>
-              <table>
-                <tbody>
-                  <tr><th>ID de activo</th><td>{selectedAssetId}</td></tr>
-                  <tr><th>Código</th><td>{display(p?.codigo)}</td></tr>
-                  <tr><th>Familia / tipo</th><td>{display(p?.familia)} · {selectedType}</td></tr>
-                  <tr><th>Progresiva</th><td>{selectedPk}</td></tr>
-                  <tr><th>Prog. fin</th><td>{formatPk(p?.progresiva_fin_m)}</td></tr>
-                  <tr><th>Geometría</th><td>{selectedGeometry ?? "—"}</td></tr>
-                  <tr><th>Lado</th><td>{display(p?.lado)}</td></tr>
-                  <tr><th>Estado validación</th><td>{display(p?.estado_validacion)}</td></tr>
-                  <tr><th>Calidad del dato</th><td>{display(p?.calidad_dato)}</td></tr>
-                  <tr><th>Método posición</th><td>{display(p?.metodo_posicion)}</td></tr>
-                  <tr><th>Precisión</th><td>{p?.precision_m !== undefined ? `${p.precision_m} m` : "—"}</td></tr>
-                  <tr><th>Fuente / lote</th><td>{display(p?.lote_origen)}</td></tr>
-                </tbody>
-              </table>
-              <div className="doc-note">
-                <strong>Estado documental</strong>
-                <p>{p?.observaciones ? p.observaciones : "Activo publicado temporalmente para consulta. La visibilidad web no implica validación técnica."}</p>
-              </div>
-
-              <div className="bridge-document-card">
-                <div><FileText size={16} /><strong>Descargas del activo seleccionado</strong></div>
-                <p>Ficha tabular y geometría exportable para trabajo de campo, QGIS y Google Earth.</p>
-                <div className="download-group">
-                  <button type="button" onClick={() => void downloadXlsx()} disabled={!selectedFeature}><Download size={13} /> XLSX</button>
-                  <button type="button" onClick={downloadKml} disabled={!selectedFeature}><Download size={13} /> KML</button>
-                  <button type="button" onClick={() => void downloadKmz()} disabled={!selectedFeature}><Download size={13} /> KMZ</button>
-                  <button type="button" onClick={downloadGeoJson} disabled={!selectedFeature}><Download size={13} /> GeoJSON</button>
-                </div>
-              </div>
-
-              <div className="bridge-document-card">
-                <div><Box size={16} /><strong>Puente Principal · AIM/IFC</strong></div>
-                <p>Primer activo BIM real del sistema. El IFC4.3 conserva trazabilidad de fuente y estado PRELIMINAR.</p>
-                <a href={IFC_URL} download><Download size={13} /> Descargar IFC4.3</a>
-              </div>
+              <div className="doc-inspector-head"><div><FileText size={16} /><strong>FICHA DEL ACTIVO · V3.2</strong></div><span className={p?.estado_validacion === "APROBADO" ? "published-pill" : "preliminary-pill"}>{display(p?.estado_validacion, "SIN ESTADO")}</span></div>
+              <table><tbody><tr><th>ID de activo</th><td>{selectedAssetId}</td></tr><tr><th>Código</th><td>{display(p?.codigo)}</td></tr><tr><th>Familia / tipo</th><td>{display(p?.familia)} · {selectedType}</td></tr><tr><th>Progresiva</th><td>{selectedPk}</td></tr><tr><th>Prog. fin</th><td>{formatPk(p?.progresiva_fin_m)}</td></tr><tr><th>Geometría</th><td>{selectedGeometry ?? "—"}</td></tr><tr><th>Lado</th><td>{display(p?.lado)}</td></tr><tr><th>Estado validación</th><td>{display(p?.estado_validacion)}</td></tr><tr><th>Calidad del dato</th><td>{display(p?.calidad_dato)}</td></tr><tr><th>Método posición</th><td>{display(p?.metodo_posicion)}</td></tr><tr><th>Precisión</th><td>{p?.precision_m !== undefined ? `${p.precision_m} m` : "—"}</td></tr><tr><th>Fuente / lote</th><td>{display(p?.lote_origen)}</td></tr></tbody></table>
+              <div className="doc-note"><strong>Estado documental</strong><p>{p?.observaciones ? p.observaciones : "Activo publicado temporalmente para consulta. La visibilidad web no implica validación técnica."}</p></div>
+              <div className="bridge-document-card"><div><FileText size={16} /><strong>Descargas del activo seleccionado</strong></div><p>Ficha tabular y geometría exportable para trabajo de campo, QGIS y Google Earth.</p><div className="download-group"><button type="button" onClick={() => void downloadXlsx()} disabled={!selectedFeature}><Download size={13} /> XLSX</button><button type="button" onClick={downloadKml} disabled={!selectedFeature}><Download size={13} /> KML</button><button type="button" onClick={() => void downloadKmz()} disabled={!selectedFeature}><Download size={13} /> KMZ</button><button type="button" onClick={downloadGeoJson} disabled={!selectedFeature}><Download size={13} /> GeoJSON</button></div></div>
+              <div className="bridge-document-card"><div><Box size={16} /><strong>Puente Principal · AIM/IFC</strong></div><p>Primer activo BIM real del sistema. El IFC4.3 conserva trazabilidad de fuente y estado PRELIMINAR.</p><a href={IFC_URL} download><Download size={13} /> Descargar IFC4.3</a></div>
             </section>
           </div>
         </article>
       </section>
 
       <footer className="asset-dock">
-        <div className="dock-identity">
-          <strong>{selectedAssetId}</strong>
-          <small>{display(p?.codigo)} · {selectedType}</small>
-        </div>
+        <div className="dock-identity"><strong>{selectedAssetId}</strong><small>{display(p?.codigo)} · {selectedType}</small></div>
         <div className="dock-field"><span>PROGRESIVA</span><b>{selectedPk}</b><small>{display(p?.estado_validacion)}</small></div>
         <div className="dock-field"><span>FAMILIA</span><b>{display(p?.familia)}</b><small>{selectedGeometry ?? "—"}</small></div>
         <div className="dock-field"><span>FILTRO GIS</span><b>{visibleTotal} / {datasetTotal}</b><small>activos visibles</small></div>
         <div className="dock-field"><span>SINCRONIZACIÓN</span><b>{loading ? "ACTUALIZANDO" : "GIS ACTIVO"}</b><small>{loadedAt ? loadedAt.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" }) : "—"}</small></div>
-        <div className="download-group">
-          <button type="button" onClick={() => void downloadXlsx()} disabled={!selectedFeature}><Download size={14} /> XLSX</button>
-          <button type="button" onClick={downloadKml} disabled={!selectedFeature}><Download size={14} /> KML</button>
-          <button type="button" onClick={() => void downloadKmz()} disabled={!selectedFeature}><Download size={14} /> KMZ</button>
-        </div>
+        <div className="download-group"><button type="button" onClick={() => void downloadXlsx()} disabled={!selectedFeature}><Download size={14} /> XLSX</button><button type="button" onClick={downloadKml} disabled={!selectedFeature}><Download size={14} /> KML</button><button type="button" onClick={() => void downloadKmz()} disabled={!selectedFeature}><Download size={14} /> KMZ</button></div>
       </footer>
     </main>
   );
