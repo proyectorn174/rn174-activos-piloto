@@ -4,7 +4,7 @@ import { BimUiPolish } from "@/components/bim-ui-polish";
 import { Rn174Viewer } from "@/components/rn174-viewer";
 import { ViewerConsoleFloating } from "@/components/viewer-console-floating";
 import { ViewerLayoutCleanup } from "@/components/viewer-layout-cleanup";
-import { VisorV4Tools } from "@/components/visor-v4-tools";
+import { VisorV5Tools } from "@/components/visor-v5-tools";
 
 export default function Home() {
   return (
@@ -14,7 +14,7 @@ export default function Home() {
       <BimSemanticExtension />
       <BimUiPolish />
       <ViewerLayoutCleanup />
-      <VisorV4Tools />
+      <VisorV5Tools />
       <ViewerConsoleFloating />
     </>
   );
