@@ -1,4 +1,5 @@
 import { BimModelSwitcher } from "@/components/bim-model-switcher";
+import { BimUiPolish } from "@/components/bim-ui-polish";
 import { Rn174Viewer } from "@/components/rn174-viewer";
 
 export default function Home() {
@@ -6,6 +7,7 @@ export default function Home() {
     <>
       <Rn174Viewer />
       <BimModelSwitcher />
+      <BimUiPolish />
       <div
         role="status"
         style={{
